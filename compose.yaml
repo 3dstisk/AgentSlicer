@@ -1,0 +1,24 @@
+services:
+  orcaslicer:
+    image: "${AGENT_SLICER_IMAGE:-ghcr.io/3dstisk/agentslicer:latest}"
+    platform: linux/amd64
+    container_name: agent-slicer-orca
+    environment:
+      PUID: "${PUID:-1000}"
+      PGID: "${PGID:-1000}"
+      TZ: "${TZ:-Europe/Prague}"
+      PIXELFLUX_WAYLAND: "false"
+      SELKIES_MANUAL_WIDTH: "${ORCA_SCREEN_WIDTH:-1920}"
+      SELKIES_MANUAL_HEIGHT: "${ORCA_SCREEN_HEIGHT:-1080}"
+      MAX_RES: "${ORCA_SCREEN_WIDTH:-1920}x${ORCA_SCREEN_HEIGHT:-1080}"
+      SELKIES_SCALING_DPI: "96"
+      TITLE: "AgentSlicer"
+    volumes:
+      - ./runtime/config:/config
+      - ./runtime/workspace:/workspace
+      - ./runtime/screenshots:/screenshots
+    ports:
+      - "127.0.0.1:${ORCA_HTTP_PORT:-3000}:3000"
+      - "127.0.0.1:${ORCA_HTTPS_PORT:-3001}:3001"
+    shm_size: "1gb"
+    restart: "no"

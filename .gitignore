@@ -46,6 +46,8 @@ test.js
 internal_docs/
 *.flatpak
 /flatpak-repo/
+/runtime/
+/docker/agent-slicer/dist/
 # Python bytecode
 __pycache__/
 *.pyc

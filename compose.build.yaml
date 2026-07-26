@@ -1,0 +1,9 @@
+services:
+  orcaslicer:
+    build:
+      context: ./docker/agent-slicer
+      dockerfile: Dockerfile
+      args:
+        BUILD_VERSION: "${BUILD_VERSION:-dev}"
+        BUILD_REVISION: "${BUILD_REVISION:-local}"
+    image: "${AGENT_SLICER_IMAGE:-agent-slicer:dev}"

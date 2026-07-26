@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+docker compose \
+    --project-directory "${repo_dir}" \
+    -f "${repo_dir}/compose.yaml" \
+    down

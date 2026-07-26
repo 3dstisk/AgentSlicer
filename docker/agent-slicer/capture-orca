@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+output_name="${1:-orca-$(date -u +%Y%m%dT%H%M%SZ).png}"
+
+if [[ "${output_name}" == */* || "${output_name}" != *.png ]]; then
+    echo "Usage: capture-orca [filename.png]" >&2
+    exit 2
+fi
+
+display=""
+for _attempt in $(seq 1 60); do
+    for candidate in "${DISPLAY:-}" :1 :0; do
+        if [[ -n "${candidate}" ]] && xdpyinfo -display "${candidate}" >/dev/null 2>&1; then
+            display="${candidate}"
+            break 2
+        fi
+    done
+    sleep 1
+done
+
+if [[ -z "${display}" ]]; then
+    echo "No working X11 display found" >&2
+    exit 1
+fi
+
+export DISPLAY="${display}"
+output_path="/screenshots/${output_name}"
+
+window_found="false"
+for _attempt in $(seq 1 60); do
+    if xdotool search --onlyvisible --name 'OrcaSlicer|Orca Slicer' >/dev/null 2>&1; then
+        window_found="true"
+        break
+    fi
+    sleep 1
+done
+
+if [[ "${window_found}" != "true" ]]; then
+    echo "No visible OrcaSlicer window found" >&2
+    exit 1
+fi
+
+# Orca's frame appears well before its embedded HTML panels finish painting.
+# Pay the longer delay only once per Orca process; later agent screenshots stay fast.
+orca_pid="$(pgrep -f '/opt/orcaslicer/bin/orca-slicer' | head -n 1 || true)"
+ready_marker="/tmp/agent-slicer-ready-pid"
+ready_pid="$(cat "${ready_marker}" 2>/dev/null || true)"
+if [[ -z "${orca_pid}" || "${ready_pid}" != "${orca_pid}" ]]; then
+    sleep "${ORCA_INITIAL_CAPTURE_SETTLE_SECONDS:-10}"
+    printf '%s\n' "${orca_pid}" > "${ready_marker}"
+else
+    sleep "${ORCA_CAPTURE_SETTLE_SECONDS:-1}"
+fi
+
+# Modal dialogs are separate X11 windows, so capture the complete desktop.
+import -display "${DISPLAY}" -window root "${output_path}"
+
+test -s "${output_path}"
+echo "${output_path}"
