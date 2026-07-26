@@ -4,6 +4,7 @@ add_executable(${_TEST_NAME}_tests
     test_dev_mapping.cpp
     test_network_versions.cpp
     test_action_source.cpp
+    test_agent_import_undo.cpp
     test_plugin_host_api.cpp
     test_plugin_capability_config.cpp
     test_plugin_config.cpp

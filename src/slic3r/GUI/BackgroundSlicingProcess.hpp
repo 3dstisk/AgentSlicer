@@ -3,6 +3,8 @@
 
 #include <string>
 #include <condition_variable>
+#include <atomic>
+#include <cstdint>
 #include <mutex>
 
 #include <boost/thread.hpp>
@@ -27,11 +29,15 @@ class SLAPrint;
 class SlicingStatusEvent : public wxEvent
 {
 public:
-	SlicingStatusEvent(wxEventType eventType, int winid, const PrintBase::SlicingStatus &status) :
-		wxEvent(winid, eventType), status(std::move(status)) {}
+	SlicingStatusEvent(wxEventType eventType, int winid, const PrintBase::SlicingStatus &status,
+                       std::uint64_t generation = 0) :
+		wxEvent(winid, eventType), status(std::move(status)), m_generation(generation) {}
 	virtual wxEvent *Clone() const { return new SlicingStatusEvent(*this); }
+    std::uint64_t generation() const { return m_generation; }
 
 	PrintBase::SlicingStatus status;
+private:
+    std::uint64_t m_generation {0};
 };
 
 class SlicingProcessCompletedEvent : public wxEvent
@@ -43,8 +49,10 @@ public:
 		Error
 	};
 
-	SlicingProcessCompletedEvent(wxEventType eventType, int winid, StatusType status, std::exception_ptr exception) :
-		wxEvent(winid, eventType), m_status(status), m_exception(exception) {}
+	SlicingProcessCompletedEvent(wxEventType eventType, int winid, StatusType status,
+                                 std::exception_ptr exception, std::uint64_t generation = 0) :
+		wxEvent(winid, eventType), m_status(status), m_exception(exception),
+        m_generation(generation) {}
 	virtual wxEvent* Clone() const { return new SlicingProcessCompletedEvent(*this); }
 
 	StatusType 	status()    const { return m_status; }
@@ -52,6 +60,7 @@ public:
 	bool 		success()   const { return m_status == Finished; }
 	bool 		cancelled() const { return m_status == Cancelled; }
 	bool		error() 	const { return m_status == Error; }
+    std::uint64_t generation() const { return m_generation; }
 	// Unhandled error produced by stdlib or a Win32 structured exception, or unhandled Slic3r's own critical exception.
 	bool 		critical_error() const;
 	// Critical errors does invalidate plater except CopyFileError.
@@ -65,6 +74,7 @@ public:
 private:
 	StatusType 			m_status;
 	std::exception_ptr 	m_exception;
+    std::uint64_t       m_generation {0};
 };
 
 //BBS: move it to plater.hpp
@@ -128,6 +138,10 @@ public:
 
 	// Start the background processing. Returns false if the background processing was already running.
 	bool start();
+    std::uint64_t run_generation() const noexcept
+    {
+        return m_run_generation.load(std::memory_order_acquire);
+    }
 	// Cancel the background processing. Returns false if the background processing was not running.
 	// A stopped background processing may be restarted with start().
 	bool stop();
@@ -255,6 +269,7 @@ private:
 	std::mutex 		 			m_mutex;
 	std::condition_variable		m_condition;
 	State 						m_state = STATE_INITIAL;
+    std::atomic<std::uint64_t> m_run_generation {0};
 
 	// For executing tasks from the background thread on UI thread synchronously (waiting for result) using wxWidgets CallAfter().
 	// When the background proces is canceled, the UITask has to be invalidated as well, so that it will not be

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export AGENT_SLICER_TOKEN="${AGENT_SLICER_TOKEN:-unused-for-compose-down}"
 docker compose \
     --project-directory "${repo_dir}" \
     -f "${repo_dir}/compose.yaml" \

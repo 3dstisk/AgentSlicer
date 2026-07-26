@@ -13,12 +13,40 @@ services:
       MAX_RES: "${ORCA_SCREEN_WIDTH:-1920}x${ORCA_SCREEN_HEIGHT:-1080}"
       SELKIES_SCALING_DPI: "96"
       TITLE: "AgentSlicer"
+      LIBGL_ALWAYS_SOFTWARE: "1"
+      GALLIUM_DRIVER: "llvmpipe"
+      DISABLE_ZINK: "true"
+      HARDEN_DESKTOP: "true"
+      START_DOCKER: "false"
+      SELKIES_FILE_TRANSFERS: "none"
+      SELKIES_COMMAND_ENABLED: "false"
+      SELKIES_ENABLE_SHARING: "false"
+      AGENT_SLICER_MCP_HOST: "0.0.0.0"
+      AGENT_SLICER_MCP_PORT: "8765"
+      AGENT_SLICER_TOKEN: "${AGENT_SLICER_TOKEN:?AGENT_SLICER_TOKEN must be set}"
+      AGENT_SLICER_ALLOWED_HOSTS: "${AGENT_SLICER_ALLOWED_HOSTS:-localhost,127.0.0.1,[::1]}"
+      AGENT_SLICER_ALLOWED_ORIGINS: "${AGENT_SLICER_ALLOWED_ORIGINS:-localhost,127.0.0.1,[::1]}"
+      AGENT_SLICER_BRIDGE_SOCKET: "/run/agent-slicer/orca-agent.sock"
+      AGENT_SLICER_MAX_IMPORT_BYTES: "${AGENT_SLICER_MAX_IMPORT_BYTES:-536870912}"
+      AGENT_SLICER_SCREENSHOT_ROOTS: "/screenshots/mcp"
+      AGENT_SLICER_DESKTOP_SCREENSHOT_ROOT: "/screenshots"
+      AGENT_SLICER_CAPTURE_EXECUTABLE: "/usr/local/bin/capture-orca"
     volumes:
       - ./runtime/config:/config
       - ./runtime/workspace:/workspace
       - ./runtime/screenshots:/screenshots
+      - ./runtime/outputs:/outputs
     ports:
       - "127.0.0.1:${ORCA_HTTP_PORT:-3000}:3000"
       - "127.0.0.1:${ORCA_HTTPS_PORT:-3001}:3001"
+      - "127.0.0.1:${AGENT_SLICER_MCP_PORT:-8765}:8765"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:8765/readyz"]
+      interval: 10s
+      timeout: 7s
+      start_period: 120s
+      retries: 12
+    security_opt:
+      - no-new-privileges:true
     shm_size: "1gb"
     restart: "no"

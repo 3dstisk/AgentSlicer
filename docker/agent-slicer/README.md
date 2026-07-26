@@ -1,20 +1,53 @@
 # AgentSlicer container
 
-Tagged commits build the existing OrcaSlicer Linux AppImage for x86_64, publish
-it on the GitHub release, and package that exact AppImage into
-`ghcr.io/3dstisk/agentslicer`.
+The x86_64 image runs OrcaSlicer, its browser desktop, and the authenticated MCP
+server in one container. Tagged commits build a fresh AppImage, package it into
+the image, run the freshly built Linux x86_64 native unit tests (including the
+agent bridge), run the complete Docker E2E, then publish the tested image.
 
-Run a published image:
+The authoritative v1 tool and security contract is in
+[the MCP API documentation](../../docs/mcp-api.md).
+
+Run it locally with a private bearer token:
 
 ```bash
+export AGENT_SLICER_TOKEN='replace-with-a-long-random-secret'
+export PUID="$(id -u)"
+export PGID="$(id -g)"
 ./scripts/agent-slicer-up
 ./scripts/agent-slicer-capture first.png
 ./scripts/agent-slicer-down
 ```
 
-The GUI is available at <http://localhost:3000>. Files shared with OrcaSlicer
-belong in `runtime/workspace`; screenshots are written to
-`runtime/screenshots`.
+Matching `PUID` and `PGID` to the host user keeps the bind-mounted workspace,
+outputs, and screenshots writable without recursively changing their ownership.
+
+The GUI is at <http://localhost:3000>; MCP is at
+`http://127.0.0.1:8765/mcp`. Both are bound to localhost by default. An MCP
+client must send `Authorization: Bearer $AGENT_SLICER_TOKEN`.
+
+Example HTTP MCP client entry:
+
+```json
+{
+  "url": "http://127.0.0.1:8765/mcp",
+  "headers": {
+    "Authorization": "Bearer replace-with-the-same-secret"
+  }
+}
+```
+
+Mount layout:
+
+- `runtime/workspace` → models imported from `/workspace`
+- `runtime/outputs` → exported `.gcode` and saved `.3mf`
+- `runtime/screenshots` → diagnostic and scene screenshots
+- `runtime/config` → persistent OrcaSlicer configuration
+
+Imports are limited to 512 MiB by default; set
+`AGENT_SLICER_MAX_IMPORT_BYTES` to a positive byte count to tighten that limit.
+Exports and saves use private staging files and are published atomically beneath
+`runtime/outputs`.
 
 To build the image locally, first place an x86_64 AppImage at
 `docker/agent-slicer/dist/OrcaSlicer.AppImage`, then run:
@@ -24,6 +57,26 @@ docker compose -f compose.yaml -f compose.build.yaml build
 docker compose -f compose.yaml -f compose.build.yaml up -d
 ```
 
-The image intentionally uses X11 (`PIXELFLUX_WAYLAND=false`). This makes the
-virtual display capturable with deterministic X11 tools and gives a future MCP
-server a stable control surface.
+`GET /livez` checks the MCP process. `GET /readyz` and `GET /healthz` require
+the native Orca bridge to be ready. Compose waits on `/readyz`. Override
+`AGENT_SLICER_ALLOWED_HOSTS` or `AGENT_SLICER_ALLOWED_ORIGINS` only when placing
+the localhost service behind a trusted proxy.
+
+On a fresh AgentSlicer configuration, Orca installs and selects its bundled
+Custom ToolChanger 0.4 mm profiles automatically. Existing user configurations
+are left unchanged, and the native bridge stays unavailable if bootstrap fails.
+
+The image uses X11 with Mesa llvmpipe so screenshots remain available without a
+GPU. The Selkies desktop disables file transfer, command execution, nested
+Docker, and terminal-oriented desktop features.
+
+For a remote deployment, keep the container ports private, terminate TLS at a
+trusted reverse proxy, use a high-entropy token, and set exact Host and Origin
+allowlists. Protect the browser desktop with the LinuxServer `CUSTOM_USER` and
+`PASSWORD` settings if it is exposed.
+
+The runtime base is the verified LinuxServer OrcaSlicer `v2.4.2-ls31` amd64
+manifest (`sha256:3d5adaa318c6451f1b67f5efb0135a3e39ffebeefe8c013af1766c9f0335aba5`).
+If startup times out, inspect `docker compose logs orcaslicer`; `/livez` isolates
+the MCP process, while a failing `/readyz` usually means Orca is still starting,
+the GUI is blocked by a dialog, or the native Unix socket is unavailable.

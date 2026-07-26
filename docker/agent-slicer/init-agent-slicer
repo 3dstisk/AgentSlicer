@@ -1,0 +1,35 @@
+#!/usr/bin/with-contenv bash
+set -euo pipefail
+
+ensure_directory() {
+    local path="$1"
+    local mode="${2:-0755}"
+    if [[ -L "${path}" ]]; then
+        echo "Refusing symlinked directory: ${path}" >&2
+        exit 1
+    fi
+    if [[ -e "${path}" && ! -d "${path}" ]]; then
+        echo "Refusing non-directory path: ${path}" >&2
+        exit 1
+    fi
+    if [[ ! -e "${path}" ]]; then
+        mkdir -p "${path}"
+    fi
+    chown abc:abc "${path}"
+    chmod "${mode}" "${path}"
+}
+
+ensure_directory /run/agent-slicer
+ensure_directory /run/agent-slicer/imports 0700
+ensure_directory /run/agent-slicer/artifacts 0700
+ensure_directory /screenshots
+ensure_directory /screenshots/mcp
+ensure_directory /outputs
+
+s6-setuidgid abc test -r /workspace
+s6-setuidgid abc test -x /workspace
+for writable_path in /run/agent-slicer/imports /run/agent-slicer/artifacts /screenshots /screenshots/mcp /outputs; do
+    probe="${writable_path}/.agent-slicer-write-test-$$"
+    s6-setuidgid abc touch "${probe}"
+    rm -f "${probe}"
+done

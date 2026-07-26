@@ -134,9 +134,10 @@ public:
 	void release_least_recently_used();
 
 	// Store the current application state onto the Undo / Redo stack, remove all snapshots after m_active_snapshot_time.
-    void take_snapshot(const std::string& snapshot_name, const Slic3r::Model& model, const Slic3r::GUI::Selection& selection, const Slic3r::GUI::GLGizmosManager& gizmos, const SnapshotData &snapshot_data);
+	// Returns the exact timestamp of the named snapshot that owns the captured state.
+    size_t take_snapshot(const std::string& snapshot_name, const Slic3r::Model& model, const Slic3r::GUI::Selection& selection, const Slic3r::GUI::GLGizmosManager& gizmos, const SnapshotData &snapshot_data);
 
-    void take_snapshot(const std::string& snapshot_name, const Slic3r::Model& model, const Slic3r::GUI::Selection& selection, const Slic3r::GUI::GLGizmosManager& gizmos, const Slic3r::GUI::PartPlateList& plate_list, const SnapshotData& snapshot_data);
+    size_t take_snapshot(const std::string& snapshot_name, const Slic3r::Model& model, const Slic3r::GUI::Selection& selection, const Slic3r::GUI::GLGizmosManager& gizmos, const Slic3r::GUI::PartPlateList& plate_list, const SnapshotData& snapshot_data);
 
     // To be called just after take_snapshot() when leaving a gizmo, inside which small edits like support point add / remove events or paiting actions were allowed.
     // Remove all but the last edit between the gizmo enter / leave snapshots.
@@ -154,6 +155,11 @@ public:
 
 	// Jump forward in time. If time_to_load is SIZE_MAX, the next snapshot is activated.
     bool redo(Slic3r::Model& model, Slic3r::GUI::GLGizmosManager& gizmos, Slic3r::GUI::PartPlateList& plate_list, size_t time_to_load = SIZE_MAX);
+
+	// Restore an owned snapshot without capturing the failed current state, then
+	// discard the transaction snapshot and all later redo state.
+	bool rollback_to_snapshot(Slic3r::Model& model, Slic3r::GUI::GLGizmosManager& gizmos,
+	                          Slic3r::GUI::PartPlateList& plate_list, size_t time_to_load);
 
 	// Snapshot history (names with timestamps).
 	// Each snapshot indicates start of an interval in which this operation is performed.

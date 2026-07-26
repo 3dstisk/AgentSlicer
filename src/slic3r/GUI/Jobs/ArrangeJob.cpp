@@ -597,6 +597,13 @@ void ArrangeJob::process(Ctl &ctl)
 
 ArrangeJob::ArrangeJob() : m_plater{wxGetApp().plater()} { }
 
+ArrangeJob::ArrangeJob(bool suppress_error_dialog, CompletionCallback completion)
+    : ArrangeJob()
+{
+    m_suppress_error_dialog = suppress_error_dialog;
+    m_completion = std::move(completion);
+}
+
 static std::string concat_strings(const std::set<std::string> &strings,
                                   const std::string &delim = "\n")
 {
@@ -608,19 +615,32 @@ static std::string concat_strings(const std::set<std::string> &strings,
 }
 
 void ArrangeJob::finalize(bool canceled, std::exception_ptr &eptr) {
+    bool agent_failed = canceled;
+    std::string failure_message = canceled ? "Arrange was cancelled" : std::string();
     try {
         if (eptr)
             std::rethrow_exception(eptr);
-    } catch (libnest2d::GeometryException &) {
-        show_error(m_plater, _(L("Arrange failed. "
-                                 "Found some exceptions when processing object geometries.")));
+    } catch (libnest2d::GeometryException &error) {
+        failure_message = error.what();
+        agent_failed = m_suppress_error_dialog;
+        if (!m_suppress_error_dialog)
+            show_error(m_plater, _(L("Arrange failed. "
+                                     "Found some exceptions when processing object geometries.")));
         eptr = nullptr;
+    } catch (const std::exception& error) {
+        failure_message = error.what();
+        eptr = std::current_exception();
     } catch (...) {
+        failure_message = "Unknown arrange error";
         eptr = std::current_exception();
     }
 
-    if (canceled || eptr)
+    if (canceled || eptr || agent_failed) {
+        m_plater->m_arrange_running.store(false);
+        if (m_completion)
+            m_completion(true, std::move(failure_message));
         return;
+    }
 
     // Unprintable items go to the last virtual bed
     int beds = 0;
@@ -734,6 +754,8 @@ void ArrangeJob::finalize(bool canceled, std::exception_ptr &eptr) {
     m_plater->update();
 
     m_plater->m_arrange_running.store(false);
+    if (m_completion)
+        m_completion(false, {});
 }
 
 std::optional<arrangement::ArrangePolygon>

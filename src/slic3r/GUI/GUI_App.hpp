@@ -69,6 +69,10 @@ class TaskManager;
 
 namespace GUI{
 
+namespace Agent {
+class AgentBridge;
+}
+
 class RemovableDriveManager;
 class OtherInstanceMessageHandler;
 class MainFrame;
@@ -292,6 +296,11 @@ private:
 	size_t m_instance_hash_int;
 
     std::unique_ptr<Downloader> m_downloader;
+    std::unique_ptr<Agent::AgentBridge> m_agent_bridge;
+    bool m_agent_bridge_post_init_complete {false};
+
+    void start_agent_bridge();
+    void stop_agent_bridge();
 
     //BBS
     std::atomic<bool> m_is_closing {false};

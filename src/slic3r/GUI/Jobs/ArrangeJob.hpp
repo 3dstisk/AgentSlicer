@@ -2,7 +2,9 @@
 #define ARRANGEJOB_HPP
 
 
+#include <functional>
 #include <optional>
+#include <string>
 
 #include "Job.hpp"
 #include "libslic3r/Arrange.hpp"
@@ -54,12 +56,14 @@ protected:
     void check_unprintable();
 
 public:
+    using CompletionCallback = std::function<void(bool failed, std::string error)>;
 
     void prepare();
 
     void process(Ctl &ctl) override;
 
     ArrangeJob();
+    ArrangeJob(bool suppress_error_dialog, CompletionCallback completion);
 
     int status_range() const
     {
@@ -68,6 +72,10 @@ public:
     }
 
     void finalize(bool canceled, std::exception_ptr &e) override;
+
+private:
+    bool               m_suppress_error_dialog {false};
+    CompletionCallback m_completion;
 };
 
 std::optional<arrangement::ArrangePolygon> get_wipe_tower_arrangepoly(const Plater &);

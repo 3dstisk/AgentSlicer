@@ -2,6 +2,7 @@
 #define slic3r_Plater_hpp_
 
 #include <memory>
+#include <optional>
 #include <vector>
 #include <boost/filesystem/path.hpp>
 
@@ -65,6 +66,18 @@ namespace UndoRedo {
 }
 
 namespace GUI {
+struct AgentProcessStatus
+{
+    bool active {false};
+    bool terminal {false};
+    bool succeeded {false};
+    bool failed {false};
+    bool cancelled {false};
+    double progress {0.0};
+    std::string error;
+    std::vector<std::string> warnings;
+};
+
 class SyncAmsInfoDialog;
 class MainFrame;
 class ConfigOptionsGroup;
@@ -386,6 +399,9 @@ public:
     std::vector<size_t> load_files(const std::vector<boost::filesystem::path>& input_files, LoadStrategy strategy = LoadStrategy::LoadModel | LoadStrategy::LoadConfig,  bool ask_multi = false);
     // To be called when providing a list of files to the GUI slic3r on command line.
     std::vector<size_t> load_files(const std::vector<std::string>& input_files, LoadStrategy strategy = LoadStrategy::LoadModel | LoadStrategy::LoadConfig,  bool ask_multi = false);
+    // Agent-only GUI commit for geometry parsed by a worker. This deliberately
+    // bypasses all modal import policy dialogs and never loads configuration.
+    std::vector<size_t> load_model_for_agent(const Model& imported);
     // to be called on drag and drop
     bool load_files(const wxArrayString& filenames);
 
@@ -625,6 +641,14 @@ public:
     wxWindow* get_select_machine_dialog();
 
     void arrange();
+    bool arrange_for_agent(std::function<void(bool failed, std::string error)> completion);
+    bool slice_for_agent(std::optional<std::size_t> plate_index);
+    bool export_gcode_for_agent(const boost::filesystem::path& output_path,
+                                std::size_t plate_index);
+    void save_project_for_agent(const boost::filesystem::path& output_path,
+                                std::weak_ptr<void> lifetime,
+                                std::function<void(bool, std::string)> completion);
+    AgentProcessStatus agent_process_status() const;
     void orient();
     void find_new_position(const ModelInstancePtrs  &instances);
     //BBS: add job state related functions

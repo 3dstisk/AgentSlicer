@@ -2,9 +2,20 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if [[ -z "${AGENT_SLICER_TOKEN:-}" ]]; then
+    echo "AGENT_SLICER_TOKEN must be set to a non-empty secret" >&2
+    exit 2
+fi
+
+export PUID="${PUID:-$(id -u)}"
+export PGID="${PGID:-$(id -g)}"
+
 mkdir -p \
     "${repo_dir}/runtime/config" \
+    "${repo_dir}/runtime/outputs" \
     "${repo_dir}/runtime/screenshots" \
+    "${repo_dir}/runtime/screenshots/mcp" \
     "${repo_dir}/runtime/workspace"
 
 docker compose \
@@ -12,4 +23,19 @@ docker compose \
     -f "${repo_dir}/compose.yaml" \
     up -d
 
-echo "AgentSlicer is starting at http://localhost:${ORCA_HTTP_PORT:-3000}"
+health_url="http://127.0.0.1:${AGENT_SLICER_MCP_PORT:-8765}/readyz"
+deadline=$((SECONDS + ${AGENT_SLICER_START_TIMEOUT_SECONDS:-300}))
+until curl --fail --silent --show-error "${health_url}" >/dev/null 2>&1; do
+    if (( SECONDS >= deadline )); then
+        echo "AgentSlicer did not become ready at ${health_url}" >&2
+        docker compose \
+            --project-directory "${repo_dir}" \
+            -f "${repo_dir}/compose.yaml" \
+            logs --tail=200 orcaslicer >&2
+        exit 1
+    fi
+    sleep 2
+done
+
+echo "AgentSlicer GUI: http://localhost:${ORCA_HTTP_PORT:-3000}"
+echo "AgentSlicer MCP: http://127.0.0.1:${AGENT_SLICER_MCP_PORT:-8765}/mcp"

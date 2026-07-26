@@ -1,0 +1,4 @@
+#!/usr/bin/with-contenv bash
+set -euo pipefail
+
+exec s6-setuidgid abc /usr/local/bin/node /opt/agent-mcp/dist/main.js

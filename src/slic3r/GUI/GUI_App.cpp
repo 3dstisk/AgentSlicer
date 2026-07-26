@@ -3,6 +3,7 @@
 #include "libslic3r/Technologies.hpp"
 #include "libslic3r/Platform.hpp"
 #include "GUI_App.hpp"
+#include "Agent/AgentBridge.hpp"
 #include "GUI_Init.hpp"
 #include "GUI_ObjectList.hpp"
 #include "slic3r/GUI/UserManager.hpp"
@@ -69,6 +70,7 @@
 #include <wx/utils.h>
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
+#include <filesystem>
 
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Model.hpp"
@@ -767,6 +769,143 @@ std::vector<std::string> GUI_App::split_str(std::string src, std::string separat
     return result;
 }
 
+void GUI_App::start_agent_bridge()
+{
+#if defined(__linux__)
+    const char* socket_path = std::getenv("AGENT_SLICER_BRIDGE_SOCKET");
+    if (socket_path == nullptr || socket_path[0] == '\0')
+        return;
+    if (!m_agent_bridge_post_init_complete || !m_opengl_initialized) {
+        BOOST_LOG_TRIVIAL(debug) << "AgentSlicer bridge waiting for post-init and OpenGL readiness";
+        return;
+    }
+
+    if (!m_agent_bridge) {
+        const char* workspace_root = std::getenv("AGENT_SLICER_WORKSPACE_ROOT");
+        const char* screenshot_root = std::getenv("AGENT_SLICER_SCREENSHOT_ROOT");
+        const char* output_root = std::getenv("AGENT_SLICER_OUTPUT_ROOT");
+        const char* max_import_bytes = std::getenv("AGENT_SLICER_MAX_IMPORT_BYTES");
+        std::string resolved_output_root = "/outputs";
+        if (output_root != nullptr && output_root[0] != '\0') {
+            if (std::filesystem::path(output_root).is_absolute())
+                resolved_output_root = output_root;
+            else
+                BOOST_LOG_TRIVIAL(error)
+                    << "Ignoring relative AGENT_SLICER_OUTPUT_ROOT; using /outputs";
+        }
+        std::uintmax_t import_limit = 512u * 1024u * 1024u;
+        if (max_import_bytes != nullptr && max_import_bytes[0] != '\0') {
+            try {
+                const std::uintmax_t configured = std::stoull(max_import_bytes);
+                if (configured > 0)
+                    import_limit = configured;
+                else
+                    BOOST_LOG_TRIVIAL(warning) << "Ignoring zero AGENT_SLICER_MAX_IMPORT_BYTES";
+            } catch (const std::exception&) {
+                BOOST_LOG_TRIVIAL(warning) << "Ignoring invalid AGENT_SLICER_MAX_IMPORT_BYTES";
+            }
+        }
+        m_agent_bridge = std::make_unique<Agent::AgentBridge>(
+            socket_path,
+            [this](std::function<void()> callback) {
+                CallAfter(std::move(callback));
+            },
+            std::chrono::seconds(10),
+            Agent::make_orca_agent_slicer_facade(*plater()),
+            workspace_root != nullptr && workspace_root[0] != '\0' ? workspace_root : "/workspace",
+            screenshot_root != nullptr && screenshot_root[0] != '\0' ? screenshot_root : "/screenshots/mcp",
+            import_limit,
+            resolved_output_root);
+    }
+
+    std::string error;
+    if (!m_agent_bridge->start(error))
+        BOOST_LOG_TRIVIAL(error) << "AgentSlicer bridge failed to start: " << error;
+    else
+        BOOST_LOG_TRIVIAL(info) << "AgentSlicer bridge listening on " << m_agent_bridge->socket_path();
+#endif
+}
+
+static bool bootstrap_agent_presets(PresetBundle& bundle, AppConfig& config,
+                                    bool app_config_exists, bool& bootstrapped)
+{
+    bootstrapped = false;
+#if !defined(__linux__)
+    (void) bundle;
+    (void) config;
+    (void) app_config_exists;
+    return true;
+#else
+    const char* socket_path = std::getenv("AGENT_SLICER_BRIDGE_SOCKET");
+    if (socket_path == nullptr || socket_path[0] == '\0')
+        return true;
+    // Never mutate an existing user configuration during headless startup, even if it
+    // currently contains only default presets. Bootstrap is reserved for a fresh data dir.
+    if (app_config_exists)
+        return true;
+
+    static const std::string vendor = PresetBundle::ORCA_DEFAULT_BUNDLE;
+    static const std::string model_id = "my_toolchanger_01";
+    static const std::string variant = "0.4";
+    static const std::string printer = "MyToolChanger 0.4 nozzle";
+    static const std::string process = "0.20mm Standard @MyToolChanger";
+    static const std::string filament = "Generic PLA @MyToolChanger";
+
+    const AppConfig::VendorMap vendors {
+        {vendor, {{model_id, {variant}}}}
+    };
+    const std::map<std::string, std::string> filaments {
+        {filament, "true"}
+    };
+
+    try {
+        BOOST_LOG_TRIVIAL(info)
+            << "Bootstrapping bundled Custom presets for AgentSlicer";
+        if (!bundle.apply_vendor_config(
+                vendors, filaments, &config, false, model_id, variant, filament)) {
+            BOOST_LOG_TRIVIAL(error)
+                << "AgentSlicer preset bootstrap failed while applying Custom vendor configuration";
+            return false;
+        }
+
+        const bool valid =
+            bundle.printers.get_selected_preset_name() == printer &&
+            bundle.prints.get_selected_preset_name() == process &&
+            bundle.filament_presets.size() == 5 &&
+            std::all_of(
+                bundle.filament_presets.begin(), bundle.filament_presets.end(),
+                [](const std::string& name) { return name == filament; });
+        if (!valid) {
+            BOOST_LOG_TRIVIAL(error)
+                << "AgentSlicer preset bootstrap produced an unexpected selection: printer="
+                << bundle.printers.get_selected_preset_name()
+                << ", process=" << bundle.prints.get_selected_preset_name()
+                << ", filament_count=" << bundle.filament_presets.size();
+            return false;
+        }
+
+        config.save();
+        BOOST_LOG_TRIVIAL(info)
+            << "AgentSlicer preset bootstrap selected " << printer
+            << ", " << process << ", and five " << filament << " presets";
+        bootstrapped = true;
+        return true;
+    } catch (const std::exception& error) {
+        BOOST_LOG_TRIVIAL(error)
+            << "AgentSlicer preset bootstrap failed: " << error.what();
+        return false;
+    }
+#endif
+}
+
+void GUI_App::stop_agent_bridge()
+{
+    if (m_agent_bridge) {
+        m_agent_bridge->stop();
+        m_agent_bridge.reset();
+    }
+}
+
 void GUI_App::post_init()
 {
     assert(initialized());
@@ -1064,6 +1203,19 @@ void GUI_App::post_init()
            }
         }
     }
+    bool agent_presets_bootstrapped = false;
+    m_agent_bridge_post_init_complete = bootstrap_agent_presets(
+        *preset_bundle, *app_config, m_app_conf_exists, agent_presets_bootstrapped);
+    if (m_agent_bridge_post_init_complete) {
+        if (agent_presets_bootstrapped) {
+            m_app_conf_exists = true;
+            load_current_presets(false, false);
+        }
+        start_agent_bridge();
+    } else {
+        BOOST_LOG_TRIVIAL(error)
+            << "AgentSlicer native bridge disabled because preset bootstrap did not complete";
+    }
     BOOST_LOG_TRIVIAL(info) << "finished post_init";
 //BBS: remove the single instance currently
 #ifdef _WIN32
@@ -1107,6 +1259,8 @@ GUI_App::GUI_App()
 void GUI_App::shutdown()
 {
     BOOST_LOG_TRIVIAL(info) << "GUI_App::shutdown enter";
+    m_agent_bridge_post_init_complete = false;
+    stop_agent_bridge();
 
 	if (m_removable_drive_manager) {
 		removable_drive_manager()->shutdown();
@@ -2407,8 +2561,11 @@ bool GUI_App::init_opengl()
 {
 #ifdef __linux__
     bool status = m_opengl_mgr.init_gl();
-    if (status)
+    if (status) {
         m_opengl_initialized = true;
+        if (m_agent_bridge_post_init_complete && !is_closing())
+            CallAfter([this] { start_agent_bridge(); });
+    }
     return status;
 #else
     return m_opengl_mgr.init_gl();
@@ -2681,6 +2838,7 @@ bool GUI_App::OnInit()
 
 int GUI_App::OnExit()
 {
+    stop_agent_bridge();
     stop_http_server();
     stop_sync_user_preset();
 
@@ -4469,6 +4627,7 @@ void GUI_App::recreate_GUI(const wxString &msg_name)
 {
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "recreate_GUI enter";
     m_is_recreating_gui = true;
+    stop_agent_bridge();
 
 
     mainframe->shutdown();
@@ -4524,6 +4683,7 @@ void GUI_App::recreate_GUI(const wxString &msg_name)
     update_publish_status();
 
     m_is_recreating_gui = false;
+    start_agent_bridge();
 
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << "recreate_GUI exit";
 }
@@ -9534,6 +9694,14 @@ void GUI_App::window_pos_center(wxTopLevelWindow *window)
 bool GUI_App::config_wizard_startup()
 {
     if (!m_app_conf_exists || preset_bundle->printers.only_default_printers()) {
+#if defined(__linux__)
+        const char* socket_path = std::getenv("AGENT_SLICER_BRIDGE_SOCKET");
+        if (socket_path != nullptr && socket_path[0] != '\0') {
+            BOOST_LOG_TRIVIAL(info)
+                << "Skipping first-run configuration wizard in AgentSlicer mode";
+            return false;
+        }
+#endif
         BOOST_LOG_TRIVIAL(info) << "run wizard...";
         run_wizard(ConfigWizard::RR_DATA_EMPTY);
         BOOST_LOG_TRIVIAL(info) << "finished run wizard";

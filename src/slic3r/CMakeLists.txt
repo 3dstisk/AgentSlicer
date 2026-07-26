@@ -4,6 +4,18 @@ project(libslic3r_gui)
 include(PrecompiledHeader)
 
 set(SLIC3R_GUI_SOURCES
+    GUI/Agent/AgentBridge.cpp
+    GUI/Agent/AgentBridge.hpp
+    GUI/Agent/AgentController.cpp
+    GUI/Agent/AgentController.hpp
+    GUI/Agent/AgentProtocol.cpp
+    GUI/Agent/AgentProtocol.hpp
+    GUI/Agent/AgentProcessTracker.hpp
+    GUI/Agent/AgentSlicerFacade.cpp
+    GUI/Agent/AgentSlicerFacade.hpp
+    GUI/Agent/RenderArtifactRollback.hpp
+    GUI/Agent/SecureFile.cpp
+    GUI/Agent/SecureFile.hpp
     GUI/Widgets/AnimaController.hpp
     GUI/Widgets/AnimaController.cpp
     Config/Snapshot.cpp
@@ -841,7 +853,7 @@ else()
     set(_opengl_link_lib OpenGL::GL)
 endif()
 
-target_link_libraries(libslic3r_gui libslic3r cereal::cereal imgui imguizmo minilzo libvgcode md4c-html glad ${_opengl_link_lib} hidapi mdns ${wxWidgets_LIBRARIES} glfw libcurl OpenSSL::SSL OpenSSL::Crypto noise::noise pybind11::embed)
+target_link_libraries(libslic3r_gui libslic3r boost_libs cereal::cereal imgui imguizmo minilzo libvgcode md4c-html glad ${_opengl_link_lib} hidapi mdns ${wxWidgets_LIBRARIES} glfw libcurl OpenSSL::SSL OpenSSL::Crypto noise::noise pybind11::embed)
 
 if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # Linux finds wxWidgets in module mode, whose include dirs and definitions

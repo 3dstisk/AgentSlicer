@@ -1,8 +1,8 @@
 services:
   orcaslicer:
     build:
-      context: ./docker/agent-slicer
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: docker/agent-slicer/Dockerfile
       args:
         BUILD_VERSION: "${BUILD_VERSION:-dev}"
         BUILD_REVISION: "${BUILD_REVISION:-local}"

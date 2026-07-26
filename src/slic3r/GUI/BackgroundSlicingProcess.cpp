@@ -351,6 +351,8 @@ void BackgroundSlicingProcess::thread_proc()
             break;
         // Process the background slicing task.
         m_state = STATE_RUNNING;
+        const std::uint64_t run_generation =
+            m_run_generation.load(std::memory_order_acquire);
         // BBS: internal cancel
         m_internal_cancelled = false;
         lck.unlock();
@@ -373,7 +375,7 @@ void BackgroundSlicingProcess::thread_proc()
                                              (m_state == STATE_CANCELED) ? SlicingProcessCompletedEvent::Cancelled :
                                              exception                   ? SlicingProcessCompletedEvent::Error :
                                                                            SlicingProcessCompletedEvent::Finished,
-                                             exception);
+                                             exception, run_generation);
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__
                                     << boost::format(": send SlicingProcessCompletedEvent to main, status %1%") % evt.status();
             wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, evt.Clone());
@@ -554,6 +556,7 @@ bool BackgroundSlicingProcess::start()
         return false;
     if (!this->idle())
         throw Slic3r::RuntimeError("Cannot start a background task, the worker thread is not idle.");
+    m_run_generation.fetch_add(1, std::memory_order_acq_rel);
     m_state = STATE_STARTED;
     m_print->set_cancel_callback([this]() { this->stop_internal(); });
     lck.unlock();

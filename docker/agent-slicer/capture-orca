@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+stdout_mode="false"
+if [[ "${1:-}" == "--stdout" ]]; then
+    stdout_mode="true"
+    shift
+fi
 output_name="${1:-orca-$(date -u +%Y%m%dT%H%M%SZ).png}"
 
 if [[ "${output_name}" == */* || "${output_name}" != *.png ]]; then
-    echo "Usage: capture-orca [filename.png]" >&2
+    echo "Usage: capture-orca [--stdout] [filename.png]" >&2
     exit 2
 fi
 
@@ -25,7 +30,41 @@ if [[ -z "${display}" ]]; then
 fi
 
 export DISPLAY="${display}"
-output_path="/screenshots/${output_name}"
+screenshot_root="${AGENT_SLICER_SCREENSHOT_ROOT:-/screenshots}"
+staging_root="${AGENT_SLICER_CAPTURE_STAGING_ROOT:-/run/agent-slicer/artifacts}"
+output_path="${screenshot_root}/${output_name}"
+
+if [[ ( "${stdout_mode}" != "true" && ( -L "${screenshot_root}" || ! -d "${screenshot_root}" ) ) ||
+      -L "${staging_root}" || ! -d "${staging_root}" ]]; then
+    echo "Screenshot and capture staging roots must be real directories" >&2
+    exit 1
+fi
+
+umask 077
+staging_dir="$(mktemp -d "${staging_root}/desktop-capture.XXXXXX")"
+staging_cleanup_path="${staging_dir}/capture.png"
+publication_dir=""
+publication_cleanup_path=""
+cleanup_staging() {
+    rm -f -- "${staging_cleanup_path}"
+    if [[ -n "${publication_cleanup_path}" ]]; then
+        rm -f -- "${publication_cleanup_path}"
+    fi
+    if [[ -n "${publication_dir}" ]]; then
+        rmdir -- "${publication_dir}" 2>/dev/null || true
+    fi
+    rmdir -- "${staging_dir}" 2>/dev/null || true
+}
+trap cleanup_staging EXIT
+if (( BASH_VERSINFO[0] >= 4 )); then
+    exec {staging_fd}<"${staging_dir}"
+fi
+if [[ -n "${staging_fd:-}" && -d "/proc/self/fd/${staging_fd}" ]]; then
+    staging_path="/proc/self/fd/${staging_fd}/capture.png"
+else
+    # Non-Linux test/development fallback. Production capture runs in Linux.
+    staging_path="${staging_cleanup_path}"
+fi
 
 window_found="false"
 for _attempt in $(seq 1 60); do
@@ -54,7 +93,28 @@ else
 fi
 
 # Modal dialogs are separate X11 windows, so capture the complete desktop.
-import -display "${DISPLAY}" -window root "${output_path}"
+if [[ "${stdout_mode}" == "true" ]]; then
+    import -display "${DISPLAY}" -window root png:-
+    exit 0
+fi
 
-test -s "${output_path}"
+import -display "${DISPLAY}" -window root "${staging_path}"
+
+test -s "${staging_path}"
+publication_dir="$(mktemp -d "${screenshot_root}/.desktop-publication.XXXXXX")"
+publication_cleanup_path="${publication_dir}/capture.png"
+if (( BASH_VERSINFO[0] >= 4 )); then
+    exec {publication_fd}<"${publication_dir}"
+fi
+if [[ -n "${publication_fd:-}" && -d "/proc/self/fd/${publication_fd}" ]]; then
+    publication_path="/proc/self/fd/${publication_fd}/capture.png"
+else
+    publication_path="${publication_cleanup_path}"
+fi
+cp -- "${staging_path}" "${publication_path}"
+test -s "${publication_path}"
+
+# The final hard link is same-filesystem, atomic, and fails if a file or symlink
+# already occupies the requested name.
+ln -- "${publication_path}" "${output_path}"
 echo "${output_path}"

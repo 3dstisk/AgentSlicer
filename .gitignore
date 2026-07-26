@@ -48,6 +48,7 @@ internal_docs/
 /flatpak-repo/
 /runtime/
 /docker/agent-slicer/dist/
+/.omx/
 # Python bytecode
 __pycache__/
 *.pyc

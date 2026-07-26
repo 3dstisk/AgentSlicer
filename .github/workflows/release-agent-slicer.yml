@@ -17,9 +17,17 @@ jobs:
       os: ubuntu-24.04
     secrets: inherit
 
-  publish:
-    name: Publish AppImage and container
+  test-linux-x86_64:
+    name: Test OrcaSlicer Linux x86_64
     needs: build-linux-x86_64
+    uses: ./.github/workflows/unit_tests.yml
+    with:
+      os: ubuntu-24.04
+      artifact: ${{ github.sha }}-tests-linux-x86_64
+
+  publish:
+    name: Test and publish AppImage and container
+    needs: [build-linux-x86_64, test-linux-x86_64]
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -51,6 +59,21 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
+      - name: Set up Node.js for Docker E2E
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: src/agent-mcp/package-lock.json
+
+      - name: Install Docker E2E client
+        run: npm ci --prefix src/agent-mcp
+
+      - name: Verify MCP adapter
+        run: |
+          npm run typecheck --prefix src/agent-mcp
+          npm test --prefix src/agent-mcp
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
         with:
@@ -67,13 +90,14 @@ jobs:
             type=ref,event=tag
             type=raw,value=latest
 
-      - name: Build and publish x86_64 container
+      - name: Build exact x86_64 container for E2E
         uses: docker/build-push-action@v7
         with:
-          context: docker/agent-slicer
+          context: .
           file: docker/agent-slicer/Dockerfile
           platforms: linux/amd64
-          push: true
+          load: true
+          push: false
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
@@ -81,6 +105,53 @@ jobs:
             BUILD_REVISION=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Run authenticated Docker E2E
+        id: docker-e2e
+        env:
+          AGENT_SLICER_IMAGE: ghcr.io/${{ github.repository_owner }}/agentslicer:${{ steps.meta.outputs.version }}
+          AGENT_SLICER_TOKEN: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+          AGENT_SLICER_START_TIMEOUT_SECONDS: "600"
+          AGENT_SLICER_MAX_IMPORT_BYTES: "1048576"
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PUID="$(id -u)"
+          export PGID="$(id -g)"
+          mkdir -p runtime/workspace runtime/e2e-artifacts runtime/outputs
+          cp tests/data/20mm_cube.obj runtime/workspace/20mm_cube.obj
+          cleanup() {
+            status=$?
+            docker compose -f compose.yaml logs --no-color > runtime/e2e-artifacts/docker-compose.log 2>&1 || true
+            ./scripts/agent-slicer-down || true
+            exit "$status"
+          }
+          trap cleanup EXIT
+          ./scripts/agent-slicer-up
+          node src/agent-mcp/e2e/docker-e2e.mjs
+
+      - name: Upload Docker E2E failure artifacts
+        if: failure() && steps.docker-e2e.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: agent-slicer-docker-e2e-${{ github.run_id }}
+          path: |
+            runtime/e2e-artifacts/
+            runtime/outputs/
+            runtime/screenshots/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Push tested container tags
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r tag; do
+            test -n "$tag"
+            docker push "$tag"
+          done <<< "$IMAGE_TAGS"
 
       - name: Publish GitHub release
         env:

@@ -3489,8 +3489,10 @@ void PartPlate::update_slice_result_valid_state(bool valid)
 //update current slice context into backgroud slicing process
 void PartPlate::update_slice_context(BackgroundSlicingProcess & process)
 {
-	auto statuscb = [this](const Slic3r::PrintBase::SlicingStatus& status) {
-		Slic3r::SlicingStatusEvent *event = new Slic3r::SlicingStatusEvent(EVT_SLICING_UPDATE, 0, status);
+    BackgroundSlicingProcess* process_ptr = &process;
+	auto statuscb = [this, process_ptr](const Slic3r::PrintBase::SlicingStatus& status) {
+		Slic3r::SlicingStatusEvent *event = new Slic3r::SlicingStatusEvent(
+            EVT_SLICING_UPDATE, 0, status, process_ptr->run_generation());
 		//BBS: GUI refactor: add plate info befor message
 		if (status.message_type == Slic3r::PrintStateBase::SlicingDefaultNotification) {
 			auto temp = Slic3r::format(_u8L(" plate %1%:"), std::to_string(m_plate_index + 1));
