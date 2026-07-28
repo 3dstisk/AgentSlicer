@@ -1,9 +1,10 @@
 # AgentSlicer container
 
 The x86_64 image runs OrcaSlicer, its browser desktop, and the authenticated MCP
-server in one container. Tagged commits build a fresh AppImage, package it into
-the image, run the freshly built Linux x86_64 native unit tests (including the
-agent bridge), run the complete Docker E2E, then publish the tested image.
+server in one container. Main-branch pushes, manual runs, and tagged commits
+build a fresh AppImage, package it into the image, run the Linux x86_64 native
+unit tests (including the agent bridge), and run the complete Docker E2E.
+Tagged commits publish the tested image.
 
 The authoritative v1 tool and security contract is in
 [the MCP API documentation](../../docs/mcp-api.md).

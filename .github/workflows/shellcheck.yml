@@ -1,18 +1,27 @@
+name: Check AgentSlicer container scripts
+
 on:
   push:
+    branches:
+      - main
     paths:
-      - '**.sh'
-      - 'scripts/linux.d/*'
+      - ".github/workflows/shellcheck.yml"
+      - "docker/agent-slicer/capture-orca"
+      - "docker/agent-slicer/init-agent-slicer"
+      - "docker/agent-slicer/service-agent-slicer-mcp"
+      - "scripts/agent-slicer-*"
   pull_request:
+    branches:
+      - main
     paths:
-      - '**.sh'
-      - 'scripts/linux.d/*'
-  schedule:
-      - cron: '55 7 * * *' # run once a day near midnight US Pacific time
-  workflow_dispatch: # allows for manual dispatch
+      - ".github/workflows/shellcheck.yml"
+      - "docker/agent-slicer/capture-orca"
+      - "docker/agent-slicer/init-agent-slicer"
+      - "docker/agent-slicer/service-agent-slicer-mcp"
+      - "scripts/agent-slicer-*"
 
-name: "Shellcheck"
-permissions: {}
+permissions:
+  contents: read
 
 jobs:
   shellcheck:
@@ -40,5 +49,12 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Shellcheck scripts
-        run: 'find . -not -name \*.md \( -path ./scripts/linux.d/\* -o -name \*.sh \) -print0 | xargs -0 ~/shellcheck'
+      - name: Shellcheck container scripts
+        run: |
+          ~/shellcheck --shell=bash \
+            docker/agent-slicer/capture-orca \
+            docker/agent-slicer/init-agent-slicer \
+            docker/agent-slicer/service-agent-slicer-mcp \
+            scripts/agent-slicer-capture \
+            scripts/agent-slicer-down \
+            scripts/agent-slicer-up

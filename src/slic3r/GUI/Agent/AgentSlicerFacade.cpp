@@ -10,6 +10,7 @@
 #include "slic3r/GUI/Jobs/Worker.hpp"
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/Plater.hpp"
+#include "slic3r/Utils/UndoRedo.hpp"
 #include "libslic3r/GCode/Thumbnails.hpp"
 #include "libslic3r/miniz_extension.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -623,7 +624,7 @@ std::string serialized_typed_value(const ConfigOptionDef& def, const nlohmann::j
             if (item.is_null() && def.nullable) return std::string("nil");
             if (!item.is_boolean())
                 throw AgentError(ErrorCode::InvalidRequest, "Setting requires booleans", {{"key", def.opt_key}});
-            return item.get<bool>() ? std::string("1") : std::string("0");
+            return item.template get<bool>() ? std::string("1") : std::string("0");
         });
     case coEnum:
         if (!value.is_string() || def.enum_keys_map == nullptr ||
@@ -635,10 +636,10 @@ std::string serialized_typed_value(const ConfigOptionDef& def, const nlohmann::j
         return serialize_vector(",", [&](const auto& item) {
             if (item.is_null() && def.nullable) return std::string("nil");
             if (!item.is_string() || def.enum_keys_map == nullptr ||
-                def.enum_keys_map->count(item.get<std::string>()) == 0)
+                def.enum_keys_map->count(item.template get<std::string>()) == 0)
                 throw AgentError(ErrorCode::InvalidRequest, "Setting requires declared enum values",
                                  {{"key", def.opt_key}, {"value", item}});
-            return item.get<std::string>();
+            return item.template get<std::string>();
         });
     case coPoint:
     case coPoints:
@@ -919,7 +920,8 @@ public:
             plate_data.push_back({
                 {"plate_index", index},
                 {"name", plate != nullptr ? plate->get_plate_name() : std::string()},
-                {"origin_mm", plate != nullptr ? vector_json(plate->get_origin()) : nullptr},
+                {"origin_mm", plate != nullptr ?
+                    vector_json(plate->get_origin()) : nlohmann::json(nullptr)},
                 {"size_mm", nlohmann::json::array({width, depth, height})}
             });
         }

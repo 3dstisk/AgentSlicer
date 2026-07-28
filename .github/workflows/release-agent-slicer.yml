@@ -1,13 +1,39 @@
-name: Release AgentSlicer x86_64
+name: AgentSlicer x86_64 image
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "*"
+    paths:
+      - ".github/actions/**"
+      - ".github/workflows/build_check_cache.yml"
+      - ".github/workflows/build_deps.yml"
+      - ".github/workflows/build_orca.yml"
+      - ".github/workflows/release-agent-slicer.yml"
+      - ".github/workflows/unit_tests.yml"
+      - "CMakeLists.txt"
+      - "**/CMakeLists.txt"
+      - "build_linux.sh"
+      - "compose*.yaml"
+      - "deps/**"
+      - "deps_src/**"
+      - "docker/**"
+      - "localization/**"
+      - "resources/**"
+      - "scripts/**"
+      - "src/**"
+      - "tests/**"
+      - "version.inc"
+  workflow_dispatch:
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-linux-x86_64:
@@ -15,7 +41,6 @@ jobs:
     uses: ./.github/workflows/build_check_cache.yml
     with:
       os: ubuntu-24.04
-    secrets: inherit
 
   test-linux-x86_64:
     name: Test OrcaSlicer Linux x86_64
@@ -26,9 +51,12 @@ jobs:
       artifact: ${{ github.sha }}-tests-linux-x86_64
 
   publish:
-    name: Test and publish AppImage and container
+    name: Test image and publish tagged builds
     needs: [build-linux-x86_64, test-linux-x86_64]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -42,7 +70,7 @@ jobs:
           path: release
           merge-multiple: true
 
-      - name: Prepare release files and Docker context
+      - name: Prepare Docker context
         shell: bash
         run: |
           set -euo pipefail
@@ -51,10 +79,6 @@ jobs:
           chmod 0755 "$appimage"
           mkdir -p docker/agent-slicer/dist
           cp "$appimage" docker/agent-slicer/dist/OrcaSlicer.AppImage
-          (
-            cd release
-            sha256sum ./*.AppImage > SHA256SUMS
-          )
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -75,6 +99,7 @@ jobs:
           npm test --prefix src/agent-mcp
 
       - name: Log in to GitHub Container Registry
+        if: startsWith(github.ref, 'refs/tags/')
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -88,7 +113,8 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/agentslicer
           tags: |
             type=ref,event=tag
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
+            type=sha,format=long,enable=${{ !startsWith(github.ref, 'refs/tags/') }}
 
       - name: Build exact x86_64 container for E2E
         uses: docker/build-push-action@v7
@@ -116,8 +142,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export PUID="$(id -u)"
-          export PGID="$(id -g)"
+          PUID="$(id -u)"
+          PGID="$(id -g)"
+          export PUID PGID
           mkdir -p runtime/workspace runtime/e2e-artifacts runtime/outputs
           cp tests/data/20mm_cube.obj runtime/workspace/20mm_cube.obj
           cleanup() {
@@ -143,6 +170,7 @@ jobs:
           retention-days: 14
 
       - name: Push tested container tags
+        if: startsWith(github.ref, 'refs/tags/')
         env:
           IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
         shell: bash
@@ -152,20 +180,3 @@ jobs:
             test -n "$tag"
             docker push "$tag"
           done <<< "$IMAGE_TAGS"
-
-      - name: Publish GitHub release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" release/*.AppImage release/SHA256SUMS --clobber
-          else
-            gh release create "$RELEASE_TAG" \
-              release/*.AppImage \
-              release/SHA256SUMS \
-              --generate-notes \
-              --title "$RELEASE_TAG"
-          fi

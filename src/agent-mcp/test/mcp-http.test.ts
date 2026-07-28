@@ -1875,7 +1875,10 @@ describe("Streamable HTTP MCP server", () => {
     ["missing", ["iso"]],
     ["duplicate", ["iso", "iso"]],
     ["out of order", ["top", "iso"]],
-  ])("rejects %s native render results", async (_name, renderViews) => {
+  ])("rejects %s native render results without deleting unverified artifacts", async (
+    _name,
+    renderViews,
+  ) => {
     const { client, renderPaths } = await startMcp({ renderViews });
     const rendered = await client.callTool({
       name: "scene_render",
@@ -1891,7 +1894,7 @@ describe("Streamable HTTP MCP server", () => {
       error: { code: "mcp_adapter_error" },
     });
     await Promise.all(
-      renderPaths.map((path) => expect(access(path)).rejects.toThrow()),
+      renderPaths.map((path) => expect(readFile(path)).resolves.toEqual(PNG)),
     );
   });
 
