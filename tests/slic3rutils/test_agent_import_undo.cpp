@@ -21,7 +21,7 @@ TEST_CASE("Agent import rollback owns its snapshot after branching from undo his
     Bed3D bed;
     GLCanvas3D canvas(nullptr, bed);
     GLGizmosManager gizmos(canvas);
-    PartPlateList plates(nullptr, &model);
+    Slic3r::GUI::PartPlateList plates(nullptr, &model);
     UndoRedo::Stack stack;
     UndoRedo::SnapshotData snapshot_data;
     snapshot_data.snapshot_type = UndoRedo::SnapshotType::Action;
