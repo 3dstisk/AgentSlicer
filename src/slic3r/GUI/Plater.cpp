@@ -5741,6 +5741,11 @@ struct Plater::priv
     void on_action_send_to_printer(bool isall = false);
     void on_action_send_to_multi_machine(SimpleEvent&);
     int update_print_required_data(Slic3r::DynamicPrintConfig config, Slic3r::Model model, Slic3r::PlateDataPtrs plate_data_list, std::string file_name, std::string file_path);
+
+    void begin_agent_process_tracking();
+    void clear_agent_process_tracking();
+    void set_show_warning_dialog(bool show);
+    AgentProcessStatus get_agent_process_status() const;
 private:
     bool layers_height_allowed() const;
 
@@ -5786,6 +5791,38 @@ const std::regex Plater::priv::pattern_3mf(".*3mf", std::regex::icase);
 const std::regex Plater::priv::pattern_zip_amf(".*[.]zip[.]amf", std::regex::icase);
 const std::regex Plater::priv::pattern_any_amf(".*[.](amf|amf[.]xml|zip[.]amf)", std::regex::icase);
 const std::regex Plater::priv::pattern_prusa(".*bbl", std::regex::icase);
+
+void Plater::priv::begin_agent_process_tracking()
+{
+    agent_process.begin(background_process.run_generation());
+}
+
+void Plater::priv::clear_agent_process_tracking()
+{
+    agent_process.clear();
+}
+
+void Plater::priv::set_show_warning_dialog(bool show)
+{
+    show_warning_dialog = show;
+}
+
+AgentProcessStatus Plater::priv::get_agent_process_status() const
+{
+    AgentProcessStatus status;
+    const auto& tracked = agent_process.snapshot();
+    status.active = tracked.active;
+    status.terminal = tracked.terminal;
+    status.succeeded = tracked.succeeded;
+    status.failed = tracked.failed;
+    status.cancelled = tracked.cancelled;
+    status.progress = tracked.progress;
+    status.error = tracked.error;
+    status.warnings.reserve(current_warnings.size());
+    for (const auto& warning : current_warnings)
+        status.warnings.push_back(warning.first.message);
+    return status;
+}
 
 bool PlaterDropTarget::OnDropFiles(wxCoord x, wxCoord y, const wxArrayString &filenames)
 {
@@ -18218,23 +18255,23 @@ bool Plater::slice_for_agent(std::optional<std::size_t> plate_index)
             return false;
         select_plate(static_cast<int>(*plate_index));
     }
-    p->agent_process.begin(p->background_process.run_generation());
-    p->show_warning_dialog = false;
+    p->begin_agent_process_tracking();
+    p->set_show_warning_dialog(false);
     reslice();
-    p->show_warning_dialog = false;
+    p->set_show_warning_dialog(false);
     const bool running = p->background_process.running();
     const bool already_sliced =
         p->partplate_list.get_curr_plate() != nullptr &&
         p->partplate_list.get_curr_plate()->is_slice_result_valid();
     const bool started = running || already_sliced;
-    p->agent_process.begin(p->background_process.run_generation());
+    p->begin_agent_process_tracking();
     if (already_sliced && !running) {
         wxQueueEvent(this, new SlicingProcessCompletedEvent(
             EVT_PROCESS_COMPLETED, 0, SlicingProcessCompletedEvent::Finished, nullptr,
             p->background_process.run_generation()));
     }
     if (!started)
-        p->agent_process.clear();
+        p->clear_agent_process_tracking();
     return started;
 }
 
@@ -18246,15 +18283,15 @@ bool Plater::export_gcode_for_agent(const boost::filesystem::path& output_path,
     if (plate_index >= static_cast<std::size_t>(p->partplate_list.get_plate_count()))
         return false;
     select_plate(static_cast<int>(plate_index));
-    p->agent_process.begin(p->background_process.run_generation());
-    p->show_warning_dialog = false;
+    p->begin_agent_process_tracking();
+    p->set_show_warning_dialog(false);
     p->export_gcode(output_path, false, false);
-    p->show_warning_dialog = false;
+    p->set_show_warning_dialog(false);
     const bool started =
         p->background_process.running() || p->background_process.is_export_scheduled();
-    p->agent_process.begin(p->background_process.run_generation());
+    p->begin_agent_process_tracking();
     if (!started)
-        p->agent_process.clear();
+        p->clear_agent_process_tracking();
     return started;
 }
 
@@ -18423,19 +18460,7 @@ void Plater::save_project_for_agent(
 
 AgentProcessStatus Plater::agent_process_status() const
 {
-    AgentProcessStatus status;
-    const auto& tracked = p->agent_process.snapshot();
-    status.active = tracked.active;
-    status.terminal = tracked.terminal;
-    status.succeeded = tracked.succeeded;
-    status.failed = tracked.failed;
-    status.cancelled = tracked.cancelled;
-    status.progress = tracked.progress;
-    status.error = tracked.error;
-    status.warnings.reserve(p->current_warnings.size());
-    for (const auto& warning : p->current_warnings)
-        status.warnings.push_back(warning.first.message);
-    return status;
+    return p->get_agent_process_status();
 }
 
 void Plater::set_current_canvas_as_dirty()
