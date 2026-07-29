@@ -53,7 +53,9 @@ static double get_volume_min_z(const GLVolume* volume)
 GizmoObjectManipulation::GizmoObjectManipulation(GLCanvas3D& glcanvas)
     : m_glcanvas(glcanvas)
 {
-    m_imperial_units = wxGetApp().app_config->get("use_inches") == "1";
+    // GLCanvas3D may be constructed without a GUI_App by headless callers.
+    m_imperial_units = wxTheApp != nullptr && wxGetApp().app_config != nullptr &&
+                       wxGetApp().app_config->get("use_inches") == "1";
     m_new_unit_string = m_imperial_units ? L_CONTEXT("in", "inches") : L("mm");
 
     const wxString shift                   = GUI::shortkey_shift_prefix();
