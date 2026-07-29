@@ -3,6 +3,7 @@
 #if defined(__linux__)
 #include <boost/asio.hpp>
 #include <boost/asio/local/stream_protocol.hpp>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -28,9 +29,21 @@ using LocalProtocol = boost::asio::local::stream_protocol;
 
 struct SocketIdentity
 {
+    struct Guard
+    {
+        ~Guard()
+        {
+            if (descriptor >= 0)
+                ::close(descriptor);
+        }
+
+        int descriptor {-1};
+    };
+
     dev_t device {};
     ino_t inode {};
     uid_t owner {};
+    std::shared_ptr<Guard> generation_guard;
     bool valid {false};
 };
 
@@ -39,7 +52,19 @@ bool socket_identity(const std::string& path, SocketIdentity& identity)
     struct stat info {};
     if (::lstat(path.c_str(), &info) != 0)
         return false;
-    identity = {info.st_dev, info.st_ino, info.st_uid, S_ISSOCK(info.st_mode)};
+    auto guard = std::make_shared<SocketIdentity::Guard>();
+    guard->descriptor =
+        ::open(path.c_str(), O_PATH | O_CLOEXEC | O_NOFOLLOW);
+    struct stat guarded_info {};
+    if (guard->descriptor < 0 ||
+        ::fstat(guard->descriptor, &guarded_info) != 0 ||
+        guarded_info.st_dev != info.st_dev ||
+        guarded_info.st_ino != info.st_ino)
+        return false;
+    identity = {
+        info.st_dev, info.st_ino, info.st_uid, std::move(guard),
+        S_ISSOCK(info.st_mode)
+    };
     return identity.valid;
 }
 
@@ -56,7 +81,10 @@ bool remove_owned_socket(const std::string& path, const SocketIdentity* expected
                 std::error_code(saved_errno, std::generic_category()).message();
         return false;
     }
-    const SocketIdentity current {info.st_dev, info.st_ino, info.st_uid, S_ISSOCK(info.st_mode)};
+    const SocketIdentity current {
+        info.st_dev, info.st_ino, info.st_uid, {},
+        S_ISSOCK(info.st_mode)
+    };
     if (!current.valid) {
         error = "Refusing to remove a non-socket bridge path";
         return false;
@@ -129,8 +157,8 @@ bool remove_stale_owned_socket(const std::string& path, std::string& error)
         return false;
     }
 
-    const SocketIdentity identity {info.st_dev, info.st_ino, info.st_uid, S_ISSOCK(info.st_mode)};
-    if (!identity.valid) {
+    SocketIdentity identity;
+    if (!socket_identity(path, identity)) {
         error = "Refusing to replace a non-socket bridge path";
         return false;
     }

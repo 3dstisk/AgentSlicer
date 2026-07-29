@@ -1202,9 +1202,11 @@ GLCanvas3D::GLCanvas3D(wxGLCanvas* canvas, Bed3D &bed)
 #if ENABLE_RETINA_GL
         m_retina_helper.reset(new RetinaHelper(canvas));
 #endif // ENABLE_RETINA_GL
+        load_arrange_settings();
+    } else {
+        m_arrange_settings_fff_seq_print.is_seq_print = true;
     }
     m_timer_set_color.Bind(wxEVT_TIMER, &GLCanvas3D::on_set_color_timer, this);
-    load_arrange_settings();
 
     m_selection.set_volumes(&m_volumes.volumes);
 

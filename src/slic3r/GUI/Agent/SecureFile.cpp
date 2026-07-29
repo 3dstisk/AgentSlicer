@@ -30,6 +30,28 @@
 
 namespace Slic3r::GUI::Agent {
 
+#if !defined(_WIN32)
+class ArtifactIdentityGuard
+{
+public:
+    explicit ArtifactIdentityGuard(int descriptor)
+        : m_descriptor(::fcntl(descriptor, F_DUPFD_CLOEXEC, 0))
+    {
+        if (m_descriptor < 0)
+            throw std::system_error(
+                errno, std::generic_category(), "duplicate artifact identity");
+    }
+
+    ~ArtifactIdentityGuard() { ::close(m_descriptor); }
+
+    ArtifactIdentityGuard(const ArtifactIdentityGuard&) = delete;
+    ArtifactIdentityGuard& operator=(const ArtifactIdentityGuard&) = delete;
+
+private:
+    int m_descriptor;
+};
+#endif
+
 namespace {
 
 constexpr std::size_t CopyBufferSize = 64u * 1024u;
@@ -175,6 +197,15 @@ bool same_identity(const struct stat& info,
         static_cast<std::uint64_t>(info.st_ino) == expected.inode;
 }
 
+ArtifactFileIdentity artifact_identity(const struct stat& info, int descriptor)
+{
+    return {
+        static_cast<std::uint64_t>(info.st_dev),
+        static_cast<std::uint64_t>(info.st_ino),
+        std::make_shared<ArtifactIdentityGuard>(descriptor)
+    };
+}
+
 void quarantine_and_remove(int directory, const std::string& target,
                            const ArtifactFileIdentity& expected,
                            const std::function<void()>& before_quarantine)
@@ -261,8 +292,7 @@ ArtifactFileIdentity trusted_artifact_identity(
     if (file.get() < 0 || ::fstat(file.get(), &info) != 0 ||
         !S_ISREG(info.st_mode))
         invalid_path("Artifact identity cannot be captured securely");
-    return {static_cast<std::uint64_t>(info.st_dev),
-            static_cast<std::uint64_t>(info.st_ino)};
+    return artifact_identity(info, file.get());
 #else
     struct _stat64 info {};
     if (::_wstat64(path.c_str(), &info) != 0 ||
@@ -388,8 +418,7 @@ TemporaryFile snapshot_workspace_import(const std::filesystem::path& workspace_r
         invalid_path("Import snapshot identity cannot be captured securely");
     TemporaryFile cleanup(
         snapshot_path,
-        {static_cast<std::uint64_t>(destination_info.st_dev),
-         static_cast<std::uint64_t>(destination_info.st_ino)});
+        artifact_identity(destination_info, destination.get()));
     std::array<std::uint8_t, CopyBufferSize> buffer {};
     std::uintmax_t total = 0;
     for (;;) {
@@ -462,10 +491,8 @@ std::filesystem::path write_exclusive_file(const std::filesystem::path& path,
     struct stat created {};
     if (::fstat(descriptor.get(), &created) != 0 || !S_ISREG(created.st_mode))
         invalid_path("Exclusive file identity cannot be captured securely");
-    const ArtifactFileIdentity identity {
-        static_cast<std::uint64_t>(created.st_dev),
-        static_cast<std::uint64_t>(created.st_ino)
-    };
+    const ArtifactFileIdentity identity =
+        artifact_identity(created, descriptor.get());
     try {
         write_all(descriptor.get(), data, size);
     } catch (...) {
@@ -522,10 +549,8 @@ SecureArtifact write_secure_artifact(
         struct stat created {};
         if (::fstat(descriptor.get(), &created) != 0 || !S_ISREG(created.st_mode))
             invalid_path("Screenshot identity cannot be captured securely");
-        const ArtifactFileIdentity identity {
-            static_cast<std::uint64_t>(created.st_dev),
-            static_cast<std::uint64_t>(created.st_ino)
-        };
+        const ArtifactFileIdentity identity =
+            artifact_identity(created, descriptor.get());
         const std::filesystem::path path = directory / filename;
         try {
             if (after_create)
@@ -616,14 +641,10 @@ std::uintmax_t publish_trusted_artifact(const std::filesystem::path& staging_roo
     if (::fstat(destination.get(), &temporary_info) != 0 ||
         !S_ISREG(temporary_info.st_mode))
         invalid_path("Artifact publication identity cannot be captured securely");
-    const ArtifactFileIdentity temporary_identity {
-        static_cast<std::uint64_t>(temporary_info.st_dev),
-        static_cast<std::uint64_t>(temporary_info.st_ino)
-    };
-    const ArtifactFileIdentity source_identity {
-        static_cast<std::uint64_t>(source_info.st_dev),
-        static_cast<std::uint64_t>(source_info.st_ino)
-    };
+    const ArtifactFileIdentity temporary_identity =
+        artifact_identity(temporary_info, destination.get());
+    const ArtifactFileIdentity source_identity =
+        artifact_identity(source_info, source.get());
 
     bool published_target = false;
     bool staging_removed = false;
@@ -709,10 +730,7 @@ std::uintmax_t publish_trusted_artifact(const std::filesystem::path& staging_roo
         if (published_target) {
             try {
                 quarantine_and_remove(
-                    output_directory.get(), target,
-                    {static_cast<std::uint64_t>(destination_info.st_dev),
-                     static_cast<std::uint64_t>(destination_info.st_ino)},
-                    {});
+                    output_directory.get(), target, temporary_identity, {});
             } catch (...) {
                 if (!cleanup_failure)
                     cleanup_failure = std::current_exception();

@@ -4,14 +4,20 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <string_view>
 
 namespace Slic3r::GUI::Agent {
+
+class ArtifactIdentityGuard;
 
 struct ArtifactFileIdentity
 {
     std::uint64_t device {0};
     std::uint64_t inode {0};
+    // Keeps the POSIX inode allocated so an unlinked replacement cannot reuse
+    // the same numeric identity while cleanup is still pending.
+    std::shared_ptr<ArtifactIdentityGuard> generation_guard;
 };
 
 class TemporaryFile

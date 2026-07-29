@@ -1154,8 +1154,11 @@ bool StackImpl::rollback_to_snapshot(Slic3r::Model& model,
 		throw Slic3r::RuntimeError("Owned rollback snapshot does not exist");
 
 	this->load_snapshot(time_to_load, model, gizmos, plate_list);
-	for (auto& entry : m_objects)
-		entry.second->release_after_timestamp(time_to_load);
+	for (auto& entry : m_objects) {
+		// History intervals are half-open. Preserve the state at time_to_load
+		// while discarding every later state.
+		entry.second->release_after_timestamp(time_to_load + 1);
+	}
 	this->release_snapshots(snapshot_it + 1, m_snapshots.end());
 	snapshot_it->name = topmost_snapshot_name;
 	snapshot_it->snapshot_data.snapshot_type = SnapshotType::Selection;
