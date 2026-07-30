@@ -577,17 +577,17 @@ public:
 	}
 
     // Store the current application state onto the Undo / Redo stack, remove all snapshots after m_active_snapshot_time.
-	size_t take_snapshot(const std::string& snapshot_name, const Slic3r::Model& model, const Slic3r::GUI::Selection& selection, const Slic3r::GUI::GLGizmosManager& gizmos, const Slic3r::GUI::PartPlateList& plate_list, const SnapshotData& snapshot_data);
+	size_t take_snapshot(const std::string& snapshot_name, const Slic3r::Model& model, const Slic3r::GUI::Selection& selection, const Slic3r::GUI::GLGizmosManager* gizmos, const Slic3r::GUI::PartPlateList& plate_list, const SnapshotData& snapshot_data);
     size_t take_snapshot(const std::string& snapshot_name, const Slic3r::Model& model, const Slic3r::GUI::Selection& selection, const Slic3r::GUI::GLGizmosManager& gizmos, const SnapshotData &snapshot_data);
     void reduce_noisy_snapshots(const std::string& new_name);
-    void load_snapshot(size_t timestamp, Slic3r::Model& model, Slic3r::GUI::GLGizmosManager& gizmos, Slic3r::GUI::PartPlateList& plate_list);
+    void load_snapshot(size_t timestamp, Slic3r::Model& model, Slic3r::GUI::GLGizmosManager* gizmos, Slic3r::GUI::PartPlateList& plate_list);
 
 	bool has_undo_snapshot() const;
 	bool has_undo_snapshot(size_t time_to_load) const;
 	bool has_redo_snapshot() const;
-    bool undo(Slic3r::Model &model, const Slic3r::GUI::Selection &selection, Slic3r::GUI::GLGizmosManager &gizmos, Slic3r::GUI::PartPlateList& plate_list, const SnapshotData &snapshot_data, size_t jump_to_time);
-    bool redo(Slic3r::Model &model, Slic3r::GUI::GLGizmosManager &gizmos, Slic3r::GUI::PartPlateList& plate_list, size_t jump_to_time);
-	bool rollback_to_snapshot(Slic3r::Model& model, Slic3r::GUI::GLGizmosManager& gizmos,
+    bool undo(Slic3r::Model &model, const Slic3r::GUI::Selection &selection, Slic3r::GUI::GLGizmosManager *gizmos, Slic3r::GUI::PartPlateList& plate_list, const SnapshotData &snapshot_data, size_t jump_to_time);
+    bool redo(Slic3r::Model &model, Slic3r::GUI::GLGizmosManager *gizmos, Slic3r::GUI::PartPlateList& plate_list, size_t jump_to_time);
+	bool rollback_to_snapshot(Slic3r::Model& model, Slic3r::GUI::GLGizmosManager* gizmos,
 	                          Slic3r::GUI::PartPlateList& plate_list, size_t time_to_load);
 	void release_least_recently_used();
 
@@ -697,6 +697,7 @@ private:
 	size_t 													m_current_time;
 	// Last selection serialized or deserialized.
 	Selection 												m_selection;
+	bool													m_gizmo_history_included { true };
 	std::vector<ObjectBase*> 								m_reusable_objects;
 };
 
@@ -920,12 +921,18 @@ size_t StackImpl::take_snapshot(const std::string& snapshot_name, const Slic3r::
 {
 	Slic3r::GUI::PartPlateList& plate_list = GUI::wxGetApp().plater()->get_partplate_list();
 
-	return take_snapshot(snapshot_name, model, selection, gizmos, plate_list, snapshot_data);
+	return take_snapshot(snapshot_name, model, selection, &gizmos, plate_list, snapshot_data);
 }
 
 // Store the current application state onto the Undo / Redo stack, remove all snapshots after m_active_snapshot_time.
-size_t StackImpl::take_snapshot(const std::string& snapshot_name, const Slic3r::Model& model, const Slic3r::GUI::Selection& selection, const Slic3r::GUI::GLGizmosManager& gizmos, const Slic3r::GUI::PartPlateList& plate_list, const SnapshotData& snapshot_data)
+size_t StackImpl::take_snapshot(const std::string& snapshot_name, const Slic3r::Model& model, const Slic3r::GUI::Selection& selection, const Slic3r::GUI::GLGizmosManager* gizmos, const Slic3r::GUI::PartPlateList& plate_list, const SnapshotData& snapshot_data)
 {
+	const bool include_gizmo_history = gizmos != nullptr;
+	if (m_snapshots.empty())
+		m_gizmo_history_included = include_gizmo_history;
+	else if (m_gizmo_history_included != include_gizmo_history)
+		throw Slic3r::RuntimeError("Cannot mix snapshots with and without gizmo state");
+
 	// Release old snapshot data.
 	assert(m_active_snapshot_time <= m_current_time);
 	for (auto &kvp : m_objects)
@@ -945,7 +952,8 @@ size_t StackImpl::take_snapshot(const std::string& snapshot_name, const Slic3r::
 	for (unsigned int volume_idx : selection.get_volume_idxs())
 		m_selection.volumes_and_instances.emplace_back(selection.get_volume(volume_idx)->geometry_id);
 	this->save_mutable_object<Selection>(m_selection);
-    this->save_mutable_object<Slic3r::GUI::GLGizmosManager>(gizmos);
+	if (gizmos != nullptr)
+		this->save_mutable_object<Slic3r::GUI::GLGizmosManager>(*gizmos);
 
 	//BBS:save the partplater related data
 	this->save_mutable_object<Slic3r::GUI::PartPlateList>(plate_list);
@@ -998,8 +1006,11 @@ void StackImpl::reduce_noisy_snapshots(const std::string& new_name)
 	}
 }
 
-void StackImpl::load_snapshot(size_t timestamp, Slic3r::Model& model, Slic3r::GUI::GLGizmosManager& gizmos, Slic3r::GUI::PartPlateList& plate_list)
+void StackImpl::load_snapshot(size_t timestamp, Slic3r::Model& model, Slic3r::GUI::GLGizmosManager* gizmos, Slic3r::GUI::PartPlateList& plate_list)
 {
+	if (m_gizmo_history_included != (gizmos != nullptr))
+		throw Slic3r::RuntimeError("Snapshot gizmo state mode does not match the undo stack");
+
 	// Find the snapshot by time. It must exist.
 	const auto it_snapshot = std::lower_bound(m_snapshots.begin(), m_snapshots.end(), Snapshot(timestamp));
 	if (it_snapshot == m_snapshots.end() || it_snapshot->timestamp != timestamp)
@@ -1015,7 +1026,8 @@ void StackImpl::load_snapshot(size_t timestamp, Slic3r::Model& model, Slic3r::GU
 	m_selection.volumes_and_instances.clear();
 	this->load_mutable_object<Selection>(m_selection.id(), m_selection);
     //gizmos.reset_all_states(); FIXME: is this really necessary? It is quite unpleasant for the gizmo undo/redo substack
-    this->load_mutable_object<Slic3r::GUI::GLGizmosManager>(gizmos.id(), gizmos);
+	if (gizmos != nullptr)
+		this->load_mutable_object<Slic3r::GUI::GLGizmosManager>(gizmos->id(), *gizmos);
     // Sort the volumes so that we may use binary search.
 	std::sort(m_selection.volumes_and_instances.begin(), m_selection.volumes_and_instances.end());
 	m_active_snapshot_time = timestamp;
@@ -1080,7 +1092,7 @@ bool StackImpl::has_redo_snapshot() const
 	return false;
 }
 
-bool StackImpl::undo(Slic3r::Model &model, const Slic3r::GUI::Selection &selection, Slic3r::GUI::GLGizmosManager &gizmos, Slic3r::GUI::PartPlateList& plate_list, const SnapshotData &snapshot_data, size_t time_to_load)
+bool StackImpl::undo(Slic3r::Model &model, const Slic3r::GUI::Selection &selection, Slic3r::GUI::GLGizmosManager *gizmos, Slic3r::GUI::PartPlateList& plate_list, const SnapshotData &snapshot_data, size_t time_to_load)
 {
 	BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(":time_to_load %1%") % time_to_load;
 	assert(this->valid());
@@ -1121,7 +1133,7 @@ bool StackImpl::undo(Slic3r::Model &model, const Slic3r::GUI::Selection &selecti
 	return true;
 }
 
-bool StackImpl::redo(Slic3r::Model& model, Slic3r::GUI::GLGizmosManager& gizmos, Slic3r::GUI::PartPlateList& plate_list, size_t time_to_load)
+bool StackImpl::redo(Slic3r::Model& model, Slic3r::GUI::GLGizmosManager* gizmos, Slic3r::GUI::PartPlateList& plate_list, size_t time_to_load)
 {
 	BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(":time_to_load %1%") % time_to_load;
 	assert(this->valid());
@@ -1142,7 +1154,7 @@ bool StackImpl::redo(Slic3r::Model& model, Slic3r::GUI::GLGizmosManager& gizmos,
 }
 
 bool StackImpl::rollback_to_snapshot(Slic3r::Model& model,
-	                                  Slic3r::GUI::GLGizmosManager& gizmos,
+	                                  Slic3r::GUI::GLGizmosManager* gizmos,
 	                                  Slic3r::GUI::PartPlateList& plate_list,
 	                                  size_t time_to_load)
 {
@@ -1394,16 +1406,23 @@ void Stack::release_least_recently_used() { pimpl->release_least_recently_used()
 size_t Stack::take_snapshot(const std::string& snapshot_name, const Slic3r::Model& model, const Slic3r::GUI::Selection& selection, const Slic3r::GUI::GLGizmosManager& gizmos, const SnapshotData &snapshot_data)
 	{ return pimpl->take_snapshot(snapshot_name, model, selection, gizmos, snapshot_data); }
 size_t Stack::take_snapshot(const std::string& snapshot_name, const Slic3r::Model& model, const Slic3r::GUI::Selection& selection, const Slic3r::GUI::GLGizmosManager& gizmos, const Slic3r::GUI::PartPlateList& plate_list, const SnapshotData& snapshot_data)
-	{ return pimpl->take_snapshot(snapshot_name, model, selection, gizmos, plate_list, snapshot_data); }
+	{ return pimpl->take_snapshot(snapshot_name, model, selection, &gizmos, plate_list, snapshot_data); }
+size_t Stack::take_snapshot(const std::string& snapshot_name, const Slic3r::Model& model, const Slic3r::GUI::Selection& selection, const Slic3r::GUI::PartPlateList& plate_list, const SnapshotData& snapshot_data)
+	{ return pimpl->take_snapshot(snapshot_name, model, selection, nullptr, plate_list, snapshot_data); }
 void Stack::reduce_noisy_snapshots(const std::string& new_name) { pimpl->reduce_noisy_snapshots(new_name); }
 bool Stack::has_undo_snapshot() const { return pimpl->has_undo_snapshot(); }
 bool Stack::has_undo_snapshot(size_t time_to_load) const { return pimpl->has_undo_snapshot(time_to_load); }
 bool Stack::has_redo_snapshot() const { return pimpl->has_redo_snapshot(); }
 bool Stack::undo(Slic3r::Model& model, const Slic3r::GUI::Selection& selection, Slic3r::GUI::GLGizmosManager& gizmos, Slic3r::GUI::PartPlateList& plate_list, const SnapshotData &snapshot_data, size_t time_to_load)
-	{ return pimpl->undo(model, selection, gizmos, plate_list, snapshot_data, time_to_load); }
-bool Stack::redo(Slic3r::Model& model, Slic3r::GUI::GLGizmosManager& gizmos, Slic3r::GUI::PartPlateList& plate_list, size_t time_to_load) { return pimpl->redo(model, gizmos, plate_list, time_to_load); }
+	{ return pimpl->undo(model, selection, &gizmos, plate_list, snapshot_data, time_to_load); }
+bool Stack::undo(Slic3r::Model& model, const Slic3r::GUI::Selection& selection, Slic3r::GUI::PartPlateList& plate_list, const SnapshotData &snapshot_data, size_t time_to_load)
+	{ return pimpl->undo(model, selection, nullptr, plate_list, snapshot_data, time_to_load); }
+bool Stack::redo(Slic3r::Model& model, Slic3r::GUI::GLGizmosManager& gizmos, Slic3r::GUI::PartPlateList& plate_list, size_t time_to_load) { return pimpl->redo(model, &gizmos, plate_list, time_to_load); }
+bool Stack::redo(Slic3r::Model& model, Slic3r::GUI::PartPlateList& plate_list, size_t time_to_load) { return pimpl->redo(model, nullptr, plate_list, time_to_load); }
 bool Stack::rollback_to_snapshot(Slic3r::Model& model, Slic3r::GUI::GLGizmosManager& gizmos, Slic3r::GUI::PartPlateList& plate_list, size_t time_to_load)
-	{ return pimpl->rollback_to_snapshot(model, gizmos, plate_list, time_to_load); }
+	{ return pimpl->rollback_to_snapshot(model, &gizmos, plate_list, time_to_load); }
+bool Stack::rollback_to_snapshot(Slic3r::Model& model, Slic3r::GUI::PartPlateList& plate_list, size_t time_to_load)
+	{ return pimpl->rollback_to_snapshot(model, nullptr, plate_list, time_to_load); }
 const Selection& Stack::selection_deserialized() const { return pimpl->selection_deserialized(); }
 
 const std::vector<Snapshot>& Stack::snapshots() const { return pimpl->snapshots(); }
