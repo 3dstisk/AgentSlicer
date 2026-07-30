@@ -6225,8 +6225,10 @@ int PartPlateList::rebuild_plates_after_deserialize(std::vector<bool>& previous_
 	}
 
 	//update the bed's position
-	Vec2d pos = compute_shape_position(m_current_plate, m_plate_cols);
-	m_plater->set_bed_position(pos);
+	if (m_plater) {
+		Vec2d pos = compute_shape_position(m_current_plate, m_plate_cols);
+		m_plater->set_bed_position(pos);
+	}
 
 	//not used
 	/*if (m_plate_width == 0)
