@@ -26,12 +26,15 @@ export interface PngImage {
 export interface PinnedFileIdentity {
   dev: number;
   ino: number;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
 }
 
 export interface UnlinkInternalPngOptions {
   beforeQuarantine?: () => Promise<void>;
   /**
-   * The inode identity obtained from a completed readInternalPng call.
+   * The file identity obtained from a completed readInternalPng call.
    * Cleanup by pathname without this proof would risk deleting a replacement.
    */
   expectedFile: PinnedFileIdentity;
@@ -128,7 +131,10 @@ function sameFile(
   return left.dev === right.dev && left.ino === right.ino;
 }
 
-function sameSnapshot(left: Stats, right: Stats): boolean {
+function sameSnapshot(
+  left: Pick<Stats, "dev" | "ino" | "size" | "mtimeMs" | "ctimeMs">,
+  right: Pick<Stats, "dev" | "ino" | "size" | "mtimeMs" | "ctimeMs">,
+): boolean {
   return sameFile(left, right) &&
     left.size === right.size &&
     left.mtimeMs === right.mtimeMs &&
@@ -238,7 +244,13 @@ export async function readInternalPng(
       mimeType: "image/png",
       path: pinned.path,
       bytes: file.length,
-      fileIdentity: { dev: before.dev, ino: before.ino },
+      fileIdentity: {
+        dev: before.dev,
+        ino: before.ino,
+        size: before.size,
+        mtimeMs: before.mtimeMs,
+        ctimeMs: before.ctimeMs,
+      },
       ...dimensions,
     };
   } finally {
@@ -284,7 +296,7 @@ export async function unlinkInternalPng(
     if (!openedFile.isFile()) {
       throw new Error("Screenshot cleanup target must be a regular file");
     }
-    if (!sameFile(options.expectedFile, openedFile)) {
+    if (!sameSnapshot(options.expectedFile, openedFile)) {
       throw new Error("Screenshot cleanup target changed after it was read");
     }
     if (process.platform === "linux") {

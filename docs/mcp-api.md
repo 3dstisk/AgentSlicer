@@ -158,10 +158,10 @@ no-symlink semantics, validates and reads through that same descriptor, verifies
 PNG structure/CRC/dimensions and requested render dimensions, and enforces the
 `AGENT_SLICER_MAX_IMAGE_BYTES` limit (16 MiB by default). Cleanup is likewise
 root-descriptor confined on Linux and is permitted only after a completed,
-validated read has pinned the PNG's device/inode identity. A render path with
-invalid native metadata or an invalid PNG is deliberately left untouched: the
-adapter never deletes by an unverified pathname, so a file raced into that name
-cannot be removed. MCP desktop capture streams ImageMagick's PNG
+validated read has pinned the PNG's device/inode and metadata identity. A render
+path with invalid native metadata or an invalid PNG is deliberately left
+untouched: the adapter never deletes by an unverified pathname, so a file raced
+into that name cannot be removed. MCP desktop capture streams ImageMagick's PNG
 on stdout with a bounded subprocess buffer, so no shared screenshot pathname is
 created, read, or cleaned up. The standalone capture helper writes through a
 descriptor for a private runtime staging directory, copies into a descriptor-

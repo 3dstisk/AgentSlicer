@@ -1071,8 +1071,8 @@ async function sceneRender(
             dependencies.maxImageBytes,
           );
           // readInternalPng returned a descriptor-pinned, fully parsed PNG, so
-          // cleanup may now be tied to this exact inode even if later semantic
-          // checks reject its dimensions.
+          // cleanup may now be tied to this exact file snapshot even if later
+          // semantic checks reject its dimensions.
           capturedIdentities.set(image.path, png.fileIdentity);
           if (png.width !== requestedWidth || png.height !== requestedHeight) {
             throw new Error("Rendered PNG dimensions do not match the requested render");
@@ -1082,7 +1082,7 @@ async function sceneRender(
       );
       // Every task must settle before cleanup snapshots capturedIdentities. A
       // fast validation error must not leave a slower, already-opened PNG
-      // orphaned after it later records its pinned inode.
+      // orphaned after it later records its pinned file identity.
       const failedImage = settledImages.find((result) => result.status === "rejected");
       if (failedImage?.status === "rejected") {
         throw failedImage.reason;

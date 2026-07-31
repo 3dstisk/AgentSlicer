@@ -5,6 +5,7 @@ import {
   mkdtemp,
   readdir,
   readFile,
+  rename,
   rm,
   symlink,
   unlink,
@@ -177,11 +178,29 @@ describe("readInternalPng", () => {
     const directory = await testDirectory();
     const root = join(directory, "root");
     const path = join(root, "render.png");
+    const replacementPath = join(root, "replacement.png");
     const replacement = Buffer.from("replacement must remain");
     await mkdir(root);
     await writeFile(path, PNG);
+    await writeFile(replacementPath, replacement);
     const png = await readInternalPng(path, [root], 1024);
     await unlink(path);
+    await rename(replacementPath, path);
+
+    await expect(
+      unlinkInternalPng(path, [root], { expectedFile: png.fileIdentity }),
+    ).rejects.toThrow("changed after it was read");
+    expect(await readFile(path)).toEqual(replacement);
+  });
+
+  it("does not remove a file modified in place after reading", async () => {
+    const directory = await testDirectory();
+    const root = join(directory, "root");
+    const path = join(root, "render.png");
+    const replacement = Buffer.from("same inode replacement must remain");
+    await mkdir(root);
+    await writeFile(path, PNG);
+    const png = await readInternalPng(path, [root], 1024);
     await writeFile(path, replacement);
 
     await expect(

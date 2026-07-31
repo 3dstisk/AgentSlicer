@@ -531,7 +531,7 @@ describe("Streamable HTTP MCP server", () => {
     await Promise.all(renderPaths.map((path) => expect(access(path)).rejects.toThrow()));
   });
 
-  it("binds scene cleanup to the inode read for the response", async () => {
+  it("binds scene cleanup to the file identity read for the response", async () => {
     const cleanupIdentities: Array<{ dev: number; ino: number } | undefined> = [];
     const { client } = await startMcp({
       async removePng(_path, _roots, options) {
@@ -549,8 +549,14 @@ describe("Streamable HTTP MCP server", () => {
     });
 
     expect(rendered.isError).not.toBe(true);
-    expect(cleanupIdentities).toEqual([
-      { dev: expect.any(Number), ino: expect.any(Number) },
+    expect(cleanupIdentities).toMatchObject([
+      {
+        dev: expect.any(Number),
+        ino: expect.any(Number),
+        size: expect.any(Number),
+        mtimeMs: expect.any(Number),
+        ctimeMs: expect.any(Number),
+      },
     ]);
   });
 
