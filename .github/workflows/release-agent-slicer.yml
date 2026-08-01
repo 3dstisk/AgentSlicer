@@ -164,6 +164,7 @@ jobs:
           name: agent-slicer-docker-e2e-${{ github.run_id }}
           path: |
             runtime/e2e-artifacts/
+            runtime/config/.config/OrcaSlicer/log/
             runtime/outputs/
             runtime/screenshots/
           if-no-files-found: warn

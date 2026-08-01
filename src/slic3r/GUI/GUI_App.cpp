@@ -845,14 +845,16 @@ static bool bootstrap_agent_presets(PresetBundle& bundle, AppConfig& config,
         return true;
 
     static const std::string vendor = PresetBundle::ORCA_DEFAULT_BUNDLE;
-    static const std::string model_id = "my_toolchanger_01";
+    // AppConfig stores the vendor profile's model identifier (the machine-model
+    // name), not its hardware model_id field.
+    static const std::string model = "Generic ToolChanger Printer";
     static const std::string variant = "0.4";
     static const std::string printer = "MyToolChanger 0.4 nozzle";
     static const std::string process = "0.20mm Standard @MyToolChanger";
     static const std::string filament = "Generic PLA @MyToolChanger";
 
     const AppConfig::VendorMap vendors {
-        {vendor, {{model_id, {variant}}}}
+        {vendor, {{model, {variant}}}}
     };
     const std::map<std::string, std::string> filaments {
         {filament, "true"}
@@ -862,7 +864,7 @@ static bool bootstrap_agent_presets(PresetBundle& bundle, AppConfig& config,
         BOOST_LOG_TRIVIAL(info)
             << "Bootstrapping bundled Custom presets for AgentSlicer";
         if (!bundle.apply_vendor_config(
-                vendors, filaments, &config, false, model_id, variant, filament)) {
+                vendors, filaments, &config, false, model, variant, filament)) {
             BOOST_LOG_TRIVIAL(error)
                 << "AgentSlicer preset bootstrap failed while applying Custom vendor configuration";
             return false;

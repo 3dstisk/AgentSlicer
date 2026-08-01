@@ -1,9 +1,11 @@
 #include <catch2/catch_all.hpp>
 
+#include <algorithm>
 #include <boost/filesystem.hpp>
 
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/AppConfig.hpp"
+#include "libslic3r/Utils.hpp"
 
 using namespace Slic3r;
 
@@ -24,6 +26,26 @@ struct TempPresetDir {
     {
         boost::system::error_code ec;
         fs::remove_all(path, ec);
+    }
+};
+
+struct ScopedPresetEnvironment {
+    TempPresetDir temp_dir;
+    std::string   previous_data_dir;
+    std::string   previous_resources_dir;
+
+    ScopedPresetEnvironment()
+        : previous_data_dir(data_dir())
+        , previous_resources_dir(resources_dir())
+    {
+        set_data_dir(temp_dir.path.string());
+        set_resources_dir(fs::path(PROFILES_DIR).parent_path().string());
+    }
+
+    ~ScopedPresetEnvironment()
+    {
+        set_resources_dir(previous_resources_dir);
+        set_data_dir(previous_data_dir);
     }
 };
 
@@ -170,6 +192,39 @@ TEST_CASE("Printer extruder count tolerates missing nozzle diameter", "[Preset][
 
     config.set_key_value("nozzle_diameter", new ConfigOptionFloats({ 0.4, 0.6 }));
     CHECK(bundle.get_printer_extruder_count() == 2);
+}
+
+TEST_CASE("Custom toolchanger bootstrap selects requested defaults", "[Preset][Bundle][Regression]")
+{
+    ScopedPresetEnvironment environment;
+    PresetBundle            bundle;
+    AppConfig               config;
+
+    bundle.setup_directories();
+
+    const AppConfig::VendorMap vendors {
+        {"Custom", {{"Generic ToolChanger Printer", {"0.4"}}}}
+    };
+    const std::map<std::string, std::string> filaments {
+        {"Generic PLA @MyToolChanger", "true"}
+    };
+
+    REQUIRE(bundle.apply_vendor_config(
+        vendors,
+        filaments,
+        &config,
+        false,
+        "Generic ToolChanger Printer",
+        "0.4",
+        "Generic PLA @MyToolChanger"));
+
+    CHECK(bundle.printers.get_selected_preset_name() == "MyToolChanger 0.4 nozzle");
+    CHECK(bundle.prints.get_selected_preset_name() == "0.20mm Standard @MyToolChanger");
+    REQUIRE(bundle.filament_presets.size() == 5);
+    CHECK(std::all_of(
+        bundle.filament_presets.begin(),
+        bundle.filament_presets.end(),
+        [](const std::string& name) { return name == "Generic PLA @MyToolChanger"; }));
 }
 
 TEST_CASE("find_preset resolves a system preset's renamed_from", "[Preset][Rename]")
@@ -487,4 +542,3 @@ TEST_CASE("Plugin capability override keys are scoped per preset type", "[Preset
             CHECK(contains(*owner.second, key) == (owner.first == scoped.first));
         }
 }
-
