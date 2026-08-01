@@ -1213,6 +1213,13 @@ bool PresetBundle::apply_vendor_config(
     const auto vendor_dir = (fs::path(Slic3r::data_dir()) / PRESET_SYSTEM_DIR).make_preferred();
 
     std::vector<std::string> install_bundles;
+    // Vendor filament presets may inherit from OrcaFilamentLibrary. A fresh data
+    // directory has neither bundle installed yet, so install the shared base before
+    // loading any requested vendor bundle.
+    auto filament_library_file = vendor_dir / (std::string(ORCA_FILAMENT_LIBRARY) + ".json");
+    if (!fs::exists(filament_library_file))
+        install_bundles.emplace_back(ORCA_FILAMENT_LIBRARY);
+
     for (const auto &it : new_vendors) {
         if (it.second.size() > 0) {
             auto vendor_file = vendor_dir / (it.first + ".json");

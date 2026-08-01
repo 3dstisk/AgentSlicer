@@ -19,6 +19,26 @@ Tests are off by default, so the build has to be told to include them.
 - macOS: `./build_release_macos.sh -s -a arm64 -T`, which builds and runs them
 - Linux: `./build_linux.sh -t`, then `ctest --test-dir build/tests`
 
+On macOS or any Docker/Podman host, run the Ubuntu 24.04 tests locally with one command. The container uses the host CPU architecture by default, avoiding x86_64 emulation on Apple Silicon:
+
+```bash
+./build_linux.sh -g -j 4 -dtrlLx
+```
+
+Architecture-specific dependency and test build trees remain on the host, so later runs are incremental. To build one suite and run one test while iterating:
+
+```bash
+ORCA_TEST_TARGET=libslic3r_tests \
+ORCA_CTEST_REGEX='Custom toolchanger bootstrap selects requested defaults' \
+./build_linux.sh -g -j 4 -trlLx
+```
+
+When `ORCA_TEST_TARGET` names a test executable, the runner automatically scopes
+CTest to that suite. Omit `ORCA_CTEST_REGEX` to run every test in the selected
+suite without building unrelated test executables.
+
+Set `ORCA_DOCKER_PLATFORM=linux/amd64` on Apple Silicon when exact GitHub Actions x86_64 parity is required.
+
 Rebuild a single suite with `cmake --build build --config Release --target <suite>_tests`. Visual Studio and Xcode are multi-configuration generators, so `ctest` needs `-C` there; on Linux it does not.
 
 ## Where a test goes

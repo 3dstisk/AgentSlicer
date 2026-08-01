@@ -1,7 +1,4 @@
 
-include(ProcessorCount)
-ProcessorCount(NPROC)
-
 set(_python_version "3.12.13")
 string(REGEX REPLACE "^([0-9]+\\.[0-9]+)\\..*" "\\1" _python_version_short "${_python_version}")
 set(_python_url "https://www.python.org/ftp/python/${_python_version}/Python-${_python_version}.tar.xz")

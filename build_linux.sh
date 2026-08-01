@@ -5,10 +5,16 @@ SECONDS=0
 SCRIPT_NAME=$(basename "$0")
 SCRIPT_PATH=$(dirname "$(readlink -f "${0}")")
 
+case "$(uname -m)" in
+    x86_64|amd64) DEFAULT_DOCKER_PLATFORM="linux/amd64" ;;
+    arm64|aarch64) DEFAULT_DOCKER_PLATFORM="linux/arm64" ;;
+    *) DEFAULT_DOCKER_PLATFORM="linux/$(uname -m)" ;;
+esac
+
 pushd "${SCRIPT_PATH}" > /dev/null
 
 function usage() {
-    echo "Usage: ./${SCRIPT_NAME} [-1][-b][-c][-d][-D][-e][-F][-g][-h][-i][-j N][-p][-r][-s][-t][-u][-l][-L]"
+    echo "Usage: ./${SCRIPT_NAME} [-1][-b][-c][-d][-D][-e][-F][-g][-h][-i][-j N][-p][-r][-s][-t][-u][-x][-l][-L]"
     echo "   -1: limit builds to one core (where possible)"
     echo "   -j N: limit builds to N cores (where possible)"
     echo "   -b: build in Debug mode"
@@ -24,15 +30,18 @@ function usage() {
     echo "   -p: boost ccache hit rate by disabling precompiled headers (default: ON)"
     echo "   -r: skip RAM and disk checks (low RAM compiling)"
     echo "   -s: build the Orca Slicer (optional)"
-    echo "   -t: build tests (optional), requires -s flag"
+    echo "   -t: build tests (optional)"
     echo "   -u: install system dependencies (asks for sudo password; build prerequisite)"
+    echo "   -x: run unit tests after building them (requires -t)"
     echo "   -l: use Clang instead of GCC (default: GCC)"
     echo "   -L: use ld.lld as linker (if available)"
     echo "For a first use, you want to './${SCRIPT_NAME} -u'"
     echo "   and then './${SCRIPT_NAME} -dsi'"
-    echo "For a GitHub Actions-like Linux build locally, use './${SCRIPT_NAME} -g -istrlL'"
+    echo "For a native-architecture Linux test locally, use './${SCRIPT_NAME} -g -j 4 -dtrlLx'"
+    echo "Set ORCA_DOCKER_PLATFORM=linux/amd64 for exact GitHub Actions x86_64 parity."
     echo "Use './${SCRIPT_NAME} -gF -istrlL' to rebuild the cached runner image first."
-    echo "Set ORCA_CONTAINER_CLI, ORCA_DOCKER_IMAGE, ORCA_DOCKER_BASE_IMAGE, or ORCA_DOCKER_CMAKE_VERSION to override the container runtime, cached image tag, base image, or CMake version."
+    echo "Set ORCA_TEST_TARGET and ORCA_CTEST_REGEX to build one suite and run matching tests."
+    echo "Set ORCA_CONTAINER_CLI, ORCA_DOCKER_IMAGE, ORCA_DOCKER_BASE_IMAGE, ORCA_DOCKER_PLATFORM, or ORCA_DOCKER_CMAKE_VERSION to override container settings."
 }
 
 SLIC3R_PRECOMPILED_HEADERS="ON"
@@ -41,7 +50,7 @@ unset name
 BUILD_DIR=build
 BUILD_CONFIG=Release
 FORWARDED_ARGS=()
-while getopts ":1j:bcCdDeFghiprstulL" opt ; do
+while getopts ":1j:bcCdDeFghiprstuxlL" opt ; do
   case ${opt} in
     1 )
         export CMAKE_BUILD_PARALLEL_LEVEL=1
@@ -110,6 +119,10 @@ while getopts ":1j:bcCdDeFghiprstulL" opt ; do
         export UPDATE_LIB="1"
         FORWARDED_ARGS+=("-u")
         ;;
+    x )
+        RUN_TESTS="1"
+        FORWARDED_ARGS+=("-x")
+        ;;
     l )
         USE_CLANG="1"
         FORWARDED_ARGS+=("-l")
@@ -133,6 +146,19 @@ fi
 if [[ -n "${CLEAN_DOCKER_IMAGE}" ]] && [[ -z "${USE_DOCKER}" ]] ; then
     echo "Error: -F requires -g."
     exit 1
+fi
+
+if [[ -n "${RUN_TESTS}" ]] && [[ -z "${BUILD_TESTS}" ]] ; then
+    echo "Error: -x requires -t."
+    exit 1
+fi
+
+if [[ -n "${ORCA_DOCKER_BUILD_DIR}" ]] ; then
+    if [[ ! "${ORCA_DOCKER_BUILD_DIR}" =~ ^build[-A-Za-z0-9_.]*$ ]] ; then
+        echo "Error: ORCA_DOCKER_BUILD_DIR must be a simple relative name beginning with 'build'."
+        exit 1
+    fi
+    BUILD_DIR="${ORCA_DOCKER_BUILD_DIR}"
 fi
 
 function check_available_memory_and_disk() {
@@ -203,6 +229,8 @@ function get_docker_runner_image() {
     local recipe_hash
     local sanitized_base_image
     local sanitized_cmake_version
+    local sanitized_platform
+    local docker_platform
 
     if [[ -n "${ORCA_DOCKER_IMAGE}" ]] ; then
         echo "${ORCA_DOCKER_IMAGE}"
@@ -211,10 +239,12 @@ function get_docker_runner_image() {
 
     base_image="${ORCA_DOCKER_BASE_IMAGE:-ubuntu:24.04}"
     docker_cmake_version="${ORCA_DOCKER_CMAKE_VERSION-4.3.0}"
+    docker_platform="${ORCA_DOCKER_PLATFORM:-${DEFAULT_DOCKER_PLATFORM}}"
     recipe_hash=$(find "${SCRIPT_PATH}/build_linux.sh" "${SCRIPT_PATH}/scripts/linux.d" -type f -print0 | sort -z | xargs -0 cat | sha256sum | cut -c1-12)
     sanitized_base_image=$(echo "${base_image}" | tr '/:@' '---' | tr -cs 'A-Za-z0-9_.-' '-')
     sanitized_cmake_version=$(echo "${docker_cmake_version:-system}" | tr -cs 'A-Za-z0-9_.-' '-')
-    echo "orcaslicer-linux-builder:${sanitized_base_image}-cmake-${sanitized_cmake_version}-${recipe_hash}"
+    sanitized_platform=$(echo "${docker_platform}" | tr '/:@' '---' | tr -cs 'A-Za-z0-9_.-' '-')
+    echo "orcaslicer-linux-builder:${sanitized_platform}-${sanitized_base_image}-cmake-${sanitized_cmake_version}-${recipe_hash}"
 }
 
 function docker_runner_dockerfile() {
@@ -262,6 +292,7 @@ function ensure_docker_runner_image() {
     local base_image
     local runner_image
     local docker_cmake_version
+    local docker_platform
     local image_exists="0"
     local force_rebuild="0"
     local -a build_cmd
@@ -270,6 +301,7 @@ function ensure_docker_runner_image() {
     runner_image="$2"
     base_image="${ORCA_DOCKER_BASE_IMAGE:-ubuntu:24.04}"
     docker_cmake_version="${ORCA_DOCKER_CMAKE_VERSION-4.3.0}"
+    docker_platform="${ORCA_DOCKER_PLATFORM:-${DEFAULT_DOCKER_PLATFORM}}"
 
     if "${container_cli}" image inspect "${runner_image}" >/dev/null 2>&1 ; then
         image_exists="1"
@@ -295,7 +327,7 @@ function ensure_docker_runner_image() {
     fi
 
     build_cmd=(
-        "${container_cli}" build --pull
+        "${container_cli}" build --pull --platform "${docker_platform}"
         -t "${runner_image}"
         --build-arg "BASE_IMAGE=${base_image}"
         --build-arg "CMAKE_VERSION=${docker_cmake_version}"
@@ -321,6 +353,9 @@ function run_in_docker() {
     local host_uid
     local host_gid
     local host_user
+    local docker_platform
+    local docker_build_dir
+    local platform_suffix
     local -a build_args
     local -a container_env
 
@@ -329,6 +364,13 @@ function run_in_docker() {
     host_uid=$(id -u)
     host_gid=$(id -g)
     host_user="${USER:-orca}"
+    docker_platform="${ORCA_DOCKER_PLATFORM:-${DEFAULT_DOCKER_PLATFORM}}"
+    platform_suffix=$(echo "${docker_platform}" | tr '/:@' '---' | tr -cs 'A-Za-z0-9_.-' '-' | sed 's/^-*//; s/-*$//')
+    docker_build_dir="${ORCA_DOCKER_BUILD_DIR:-${BUILD_DIR}-${platform_suffix}}"
+    if [[ ! "${docker_build_dir}" =~ ^build[-A-Za-z0-9_.]*$ ]] ; then
+        echo "Error: ORCA_DOCKER_BUILD_DIR must be a simple relative name beginning with 'build'."
+        exit 1
+    fi
     container_workspace="/__w/OrcaSlicer/OrcaSlicer"
     build_args=()
     for item in "${FORWARDED_ARGS[@]}" ; do
@@ -348,6 +390,10 @@ function run_in_docker() {
         -e "HOST_UID=${host_uid}"
         -e "HOST_GID=${host_gid}"
         -e "HOST_USER=${host_user}"
+        -e "ORCA_DOCKER_BUILD_DIR=${docker_build_dir}"
+        -e "ORCA_CTEST_REGEX=${ORCA_CTEST_REGEX-}"
+        -e "ORCA_TEST_TARGET=${ORCA_TEST_TARGET-}"
+        -e "ORCA_SKIP_VERSION_UPDATE=1"
     )
     if [[ -n "${CMAKE_BUILD_PARALLEL_LEVEL}" ]] ; then
         container_env+=( -e "CMAKE_BUILD_PARALLEL_LEVEL=${CMAKE_BUILD_PARALLEL_LEVEL}" )
@@ -358,7 +404,7 @@ function run_in_docker() {
 
     ensure_docker_runner_image "${container_cli}" "${runner_image}"
 
-    printf '%q ' "${container_cli}" run --rm -i \
+    printf '%q ' "${container_cli}" run --rm -i --platform "${docker_platform}" \
         -v "${SCRIPT_PATH}:${container_workspace}" \
         -w "${container_workspace}" \
         "${container_env[@]}" \
@@ -369,7 +415,7 @@ function run_in_docker() {
         return
     fi
 
-    "${container_cli}" run --rm -i \
+    "${container_cli}" run --rm -i --platform "${docker_platform}" \
         -v "${SCRIPT_PATH}:${container_workspace}" \
         -w "${container_workspace}" \
         "${container_env[@]}" \
@@ -407,22 +453,20 @@ function create_builder_user() {
 }
 
 create_builder_user
-mkdir -p "${GITHUB_WORKSPACE}/deps/build/destdir"
-chown -R "${HOST_UID}:${HOST_GID}" "${GITHUB_WORKSPACE}/deps/build"
-if [[ -d "${GITHUB_WORKSPACE}/build" ]] ; then
-    chown -R "${HOST_UID}:${HOST_GID}" "${GITHUB_WORKSPACE}/build"
-fi
-if [[ -d "${GITHUB_WORKSPACE}/build-dbg" ]] ; then
-    chown -R "${HOST_UID}:${HOST_GID}" "${GITHUB_WORKSPACE}/build-dbg"
-fi
-if [[ -d "${GITHUB_WORKSPACE}/build-dbginfo" ]] ; then
-    chown -R "${HOST_UID}:${HOST_GID}" "${GITHUB_WORKSPACE}/build-dbginfo"
+mkdir -p "${GITHUB_WORKSPACE}/deps/${ORCA_DOCKER_BUILD_DIR}/destdir"
+chown -R "${HOST_UID}:${HOST_GID}" "${GITHUB_WORKSPACE}/deps/${ORCA_DOCKER_BUILD_DIR}"
+if [[ -d "${GITHUB_WORKSPACE}/${ORCA_DOCKER_BUILD_DIR}" ]] ; then
+    chown -R "${HOST_UID}:${HOST_GID}" "${GITHUB_WORKSPACE}/${ORCA_DOCKER_BUILD_DIR}"
 fi
 
 sudo -H -u "${HOST_USER}" env \
     CMAKE_BUILD_PARALLEL_LEVEL="${CMAKE_BUILD_PARALLEL_LEVEL-}" \
     GITHUB_WORKSPACE="${GITHUB_WORKSPACE}" \
     ORCA_UPDATER_SIG_KEY="${ORCA_UPDATER_SIG_KEY-}" \
+    ORCA_CTEST_REGEX="${ORCA_CTEST_REGEX-}" \
+    ORCA_DOCKER_BUILD_DIR="${ORCA_DOCKER_BUILD_DIR}" \
+    ORCA_SKIP_VERSION_UPDATE="${ORCA_SKIP_VERSION_UPDATE-}" \
+    ORCA_TEST_TARGET="${ORCA_TEST_TARGET-}" \
     bash -c '
         set -e
         cd "${GITHUB_WORKSPACE}"
@@ -475,12 +519,14 @@ if [[ -z "${FOUND_GTK3_DEV}" ]] ; then
     exit 1
 fi
 
-echo "Changing date in version..."
-{
-    # change date in version
-    sed --in-place "s/+UNKNOWN/_$(date '+%F')/" version.inc
-}
-echo "done"
+if [[ -z "${ORCA_SKIP_VERSION_UPDATE}" ]] ; then
+    echo "Changing date in version..."
+    {
+        # change date in version
+        sed --in-place "s/+UNKNOWN/_$(date '+%F')/" version.inc
+    }
+    echo "done"
+fi
 
 
 if [[ -z "${SKIP_RAM_CHECK}" ]] ; then
@@ -571,7 +617,17 @@ if [[ -n "${BUILD_ORCA}" ]] || [[ -n "${BUILD_TESTS}" ]] ; then
     fi
     if [[ -n "${BUILD_TESTS}" ]] ; then
 	echo "Building tests ..."
-	print_and_run cmake --build ${BUILD_DIR} --config "${BUILD_CONFIG}" --target tests/all
+	print_and_run cmake --build ${BUILD_DIR} --config "${BUILD_CONFIG}" --target "${ORCA_TEST_TARGET:-tests/all}"
+        if [[ -n "${RUN_TESTS}" ]] ; then
+            CTEST_DIR="${BUILD_DIR}/tests"
+            if [[ "${ORCA_TEST_TARGET:-}" =~ ^([A-Za-z0-9_.-]+)_tests$ ]] ; then
+                TARGET_CTEST_DIR="${CTEST_DIR}/${BASH_REMATCH[1]}"
+                if [[ -f "${TARGET_CTEST_DIR}/CTestTestfile.cmake" ]] ; then
+                    CTEST_DIR="${TARGET_CTEST_DIR}"
+                fi
+            fi
+            print_and_run ./scripts/run_unit_tests.sh "${CTEST_DIR}" "${BUILD_CONFIG}" "${ORCA_CTEST_REGEX:-}"
+        fi
     fi
     echo "done"
 fi
