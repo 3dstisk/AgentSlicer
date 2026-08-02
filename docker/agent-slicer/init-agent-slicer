@@ -25,10 +25,11 @@ ensure_directory /run/agent-slicer/artifacts 0700
 ensure_directory /screenshots
 ensure_directory /screenshots/mcp
 ensure_directory /outputs
+ensure_directory /workspace/uploads 0700
 
 s6-setuidgid abc test -r /workspace
 s6-setuidgid abc test -x /workspace
-for writable_path in /run/agent-slicer/imports /run/agent-slicer/artifacts /screenshots /screenshots/mcp /outputs; do
+for writable_path in /run/agent-slicer/imports /run/agent-slicer/artifacts /screenshots /screenshots/mcp /outputs /workspace/uploads; do
     probe="${writable_path}/.agent-slicer-write-test-$$"
     s6-setuidgid abc touch "${probe}"
     rm -f "${probe}"

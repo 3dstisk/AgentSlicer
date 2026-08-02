@@ -40,6 +40,8 @@ services:
       AGENT_SLICER_ALLOWED_ORIGINS: agent-slicer.3dstisk.com
       AGENT_SLICER_BRIDGE_SOCKET: /run/agent-slicer/orca-agent.sock
       AGENT_SLICER_MAX_IMPORT_BYTES: "536870912"
+      AGENT_SLICER_MAX_UPLOAD_BYTES: "536870912"
+      AGENT_SLICER_UPLOAD_TTL_MS: "900000"
       AGENT_SLICER_SCREENSHOT_ROOTS: /screenshots/mcp
       AGENT_SLICER_DESKTOP_SCREENSHOT_ROOT: /screenshots
       AGENT_SLICER_CAPTURE_EXECUTABLE: /usr/local/bin/capture-orca
@@ -106,16 +108,14 @@ services:
         - "traefik.http.routers.3dstisk_agent_slicer.service=3dstisk_agent_slicer"
         - "traefik.http.services.3dstisk_agent_slicer.loadbalancer.server.port=3000"
 
-        # MCP API: https://agent-slicer.3dstisk.com/mcp
-        - "traefik.http.routers.3dstisk_agent_slicer_mcp.rule=Host(`agent-slicer.3dstisk.com`) && PathPrefix(`/mcp`)"
+        # MCP API and authenticated model uploads.
+        - "traefik.http.routers.3dstisk_agent_slicer_mcp.rule=Host(`agent-slicer.3dstisk.com`) && (PathPrefix(`/mcp`) || PathPrefix(`/uploads`))"
         - "traefik.http.routers.3dstisk_agent_slicer_mcp.entrypoints=websecure"
         - "traefik.http.routers.3dstisk_agent_slicer_mcp.tls=true"
         - "traefik.http.routers.3dstisk_agent_slicer_mcp.priority=100"
         - "traefik.http.routers.3dstisk_agent_slicer_mcp.service=3dstisk_agent_slicer_mcp"
         - "traefik.http.services.3dstisk_agent_slicer_mcp.loadbalancer.server.port=8765"
 
-        # Keep the existing provider label and the Traefik v3 Swarm equivalent.
-        - "traefik.docker.network=nginx-proxy-public"
         - "traefik.swarm.network=nginx-proxy-public"
 
 volumes:

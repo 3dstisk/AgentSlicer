@@ -9,18 +9,25 @@ import {
 } from "@modelcontextprotocol/server";
 
 import type { AgentMcpConfig } from "./config.js";
-import { registerAgentTools, type ToolDependencies } from "./tool-contract.js";
+import { registerAgentResources } from "./resources.js";
+import {
+  registerAgentTools,
+  type AgentToolDependencies,
+  type ToolDependencies,
+} from "./tool-contract.js";
+import { isUploadId, UploadError, UploadManager } from "./uploads.js";
 
-export function createAgentMcpServer(dependencies: ToolDependencies): McpServer {
+export function createAgentMcpServer(dependencies: AgentToolDependencies): McpServer {
   const server = new McpServer({
     name: "AgentSlicer",
     version: "0.1.0",
   });
+  registerAgentResources(server, dependencies.uploads);
   registerAgentTools(server, dependencies);
   return server;
 }
 
-export function createAgentMcpHandler(dependencies: ToolDependencies): McpHttpHandler {
+export function createAgentMcpHandler(dependencies: AgentToolDependencies): McpHttpHandler {
   return createMcpHandler(() => createAgentMcpServer(dependencies), {
     legacy: "stateless",
     responseMode: "auto",
@@ -105,7 +112,12 @@ export function createAgentHttpServer(
   config: AgentMcpConfig,
   dependencies: ToolDependencies,
 ): AgentHttpServer {
-  const handler = createAgentMcpHandler(dependencies);
+  const uploads = new UploadManager(
+    config.workspaceRoot,
+    config.maxUploadBytes,
+    config.uploadTtlMs,
+  );
+  const handler = createAgentMcpHandler({ ...dependencies, uploads });
   const mcp = toNodeHandler(handler);
   const validateHost = hostHeaderValidation([...config.allowedHosts]);
   const validateOrigin = originValidation([...config.allowedOrigins]);
@@ -143,7 +155,9 @@ export function createAgentHttpServer(
         );
         return;
       }
-      if (path !== "/mcp") {
+      const uploadMatch = /^\/uploads\/([^/]+)$/.exec(path);
+      const uploadId = uploadMatch?.[1];
+      if (path !== "/mcp" && (uploadId === undefined || !isUploadId(uploadId))) {
         sendJson(response, 404, { error: "not_found" });
         return;
       }
@@ -152,6 +166,30 @@ export function createAgentHttpServer(
       }
       if (!authorized(request, config.bearerToken)) {
         sendJson(response, 401, { error: "unauthorized" });
+        return;
+      }
+      if (uploadId !== undefined) {
+        if (request.method !== "PUT") {
+          response.setHeader("allow", "PUT");
+          sendJson(response, 405, { error: "method_not_allowed" });
+          return;
+        }
+        try {
+          const uploaded = await uploads.receive(uploadId, request);
+          response.setHeader("cache-control", "no-store");
+          response.setHeader("x-content-type-options", "nosniff");
+          sendJson(response, 201, uploaded);
+        } catch (error) {
+          request.resume();
+          if (error instanceof UploadError) {
+            sendJson(response, error.status, { error: error.code, message: error.message });
+          } else {
+            sendJson(response, 500, {
+              error: "upload_storage_error",
+              message: "Upload storage is unavailable",
+            });
+          }
+        }
         return;
       }
       await mcp(request, response);

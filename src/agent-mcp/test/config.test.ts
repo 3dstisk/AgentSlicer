@@ -19,4 +19,23 @@ describe("MCP configuration security", () => {
       }).bearerToken,
     ).toBe("deployment-secret");
   });
+
+  it("configures bounded uploads alongside the native import limit", () => {
+    const inherited = loadConfig({ AGENT_SLICER_MAX_IMPORT_BYTES: "4096" });
+    expect(inherited.maxUploadBytes).toBe(4096);
+    expect(inherited.workspaceRoot).toBe("/workspace");
+    expect(inherited.uploadTtlMs).toBe(15 * 60 * 1000);
+
+    const overridden = loadConfig({
+      AGENT_SLICER_MAX_IMPORT_BYTES: "4096",
+      AGENT_SLICER_MAX_UPLOAD_BYTES: "2048",
+      AGENT_SLICER_UPLOAD_TTL_MS: "60000",
+    });
+    expect(overridden.workspaceRoot).toBe("/workspace");
+    expect(overridden.maxUploadBytes).toBe(2048);
+    expect(overridden.uploadTtlMs).toBe(60_000);
+    expect(() => loadConfig({ AGENT_SLICER_UPLOAD_TTL_MS: "86400001" })).toThrow(
+      "at most 86400000",
+    );
+  });
 });

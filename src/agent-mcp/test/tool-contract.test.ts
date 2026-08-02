@@ -11,6 +11,7 @@ describe("MCP tool schemas", () => {
   it("exports the deterministic tool order", () => {
     expect(toolNames).toEqual([
       "slicer_status",
+      "upload_prepare",
       "project_create",
       "model_import",
       "scene_get",
@@ -28,6 +29,31 @@ describe("MCP tool schemas", () => {
       "gcode_export",
       "project_save",
     ]);
+  });
+
+  it("accepts only root-level supported upload filenames and strong checksums", () => {
+    expect(toolSchemas.upload_prepare.safeParse({
+      filename: "part.STL",
+      bytes: 123,
+      sha256: "a".repeat(64),
+    }).success).toBe(true);
+    for (const filename of ["../part.stl", "nested/part.obj", "part.gcode", ".stl"]) {
+      expect(toolSchemas.upload_prepare.safeParse({
+        filename,
+        bytes: 123,
+        sha256: "a".repeat(64),
+      }).success, filename).toBe(false);
+    }
+    expect(toolSchemas.upload_prepare.safeParse({
+      filename: "part.3mf",
+      bytes: 0,
+      sha256: "a".repeat(64),
+    }).success).toBe(false);
+    expect(toolSchemas.upload_prepare.safeParse({
+      filename: "part.3mf",
+      bytes: 123,
+      sha256: "not-a-sha256",
+    }).success).toBe(false);
   });
 
   it("requires project ids and revisions on mutations", () => {

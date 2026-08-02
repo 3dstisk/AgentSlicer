@@ -26,8 +26,9 @@ Matching `PUID` and `PGID` to the host user keeps the bind-mounted workspace,
 outputs, and screenshots writable without recursively changing their ownership.
 
 The GUI is at <http://localhost:3000>; MCP is at
-`http://127.0.0.1:8765/mcp`. Both are bound to localhost by default. An MCP
-client must send `Authorization: Bearer $AGENT_SLICER_TOKEN`.
+`http://127.0.0.1:8765/mcp`. Both are bound to localhost by default. MCP and
+`PUT /uploads/<upload_id>` requests must send
+`Authorization: Bearer $AGENT_SLICER_TOKEN`.
 
 Example HTTP MCP client entry:
 
@@ -49,6 +50,11 @@ Mount layout:
 
 Imports are limited to 512 MiB by default; set
 `AGENT_SLICER_MAX_IMPORT_BYTES` to a positive byte count to tighten that limit.
+Uploads use the same limit by default. Set `AGENT_SLICER_MAX_UPLOAD_BYTES` to a
+lower positive byte count when needed, and set `AGENT_SLICER_UPLOAD_TTL_MS` to
+change the 15-minute one-time ticket lifetime. Uploads are streamed, verified
+against the prepared SHA-256 and byte count, and published atomically under
+`runtime/workspace/uploads`.
 Exports and saves use private staging files and are published atomically beneath
 `runtime/outputs`.
 

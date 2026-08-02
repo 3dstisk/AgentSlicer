@@ -5,6 +5,10 @@ bridge inside the same container:
 
 `MCP client → Streamable HTTP /mcp → Node adapter → Unix socket → Orca GUI thread`
 
+Model bytes use the same authenticated origin through one-time
+`PUT /uploads/<upload_id>` requests and are published beneath `/workspace` only
+after exact length and SHA-256 verification.
+
 The native protocol version reported by `slicer_status` is `1`. MCP tool inputs
 and outputs are JSON; renders and desktop captures also return MCP image content.
 `GET /livez` checks the adapter process, while `GET /readyz` and `/healthz`
@@ -13,8 +17,8 @@ check the native bridge.
 ## Transport and access control
 
 The default endpoint is `http://127.0.0.1:8765/mcp`. When configured, every MCP
-request must send `Authorization: Bearer <AGENT_SLICER_TOKEN>`. Binding outside
-loopback without a token is rejected at startup.
+request and upload must send `Authorization: Bearer <AGENT_SLICER_TOKEN>`.
+Binding outside loopback without a token is rejected at startup.
 
 `AGENT_SLICER_ALLOWED_HOSTS` and `AGENT_SLICER_ALLOWED_ORIGINS` are comma-separated
 host allowlists. The `Host` header is always checked; an `Origin` header is
@@ -28,6 +32,7 @@ The v1 tool list and order are fixed:
 | Tool | Contract |
 | --- | --- |
 | `slicer_status` | Return readiness, native protocol version, active project/revision, job count, and capabilities. |
+| `upload_prepare` | Create a single-use upload ticket for a named `.stl`, `.obj`, or `.3mf` with an exact byte count and SHA-256. |
 | `project_create` | Reset Orca to one empty active project; return `project_id` and new `revision`. |
 | `model_import` | Start import of an `.stl`, `.obj`, or `.3mf` from an absolute `/workspace/...` path and return a job. |
 | `scene_get` | Return objects, instances, transforms, bounds, plates, and current revision. |
@@ -47,6 +52,39 @@ The v1 tool list and order are fixed:
 
 Unknown fields are rejected. Opaque IDs and cursors must be copied exactly, not
 parsed or constructed by clients.
+
+## Uploads and MCP documentation
+
+Clients can discover the detailed upload workflow through the static MCP
+resource `agentslicer://docs/upload` using `resources/list` and
+`resources/read`. The `upload_prepare` and `model_import` tool descriptions also
+reference that resource for clients that do not load MCP resources automatically.
+
+Call `upload_prepare` with a root-level supported filename, positive byte count,
+and lowercase or uppercase SHA-256. It returns:
+
+- a one-time `upload_path` beneath `/uploads`
+- the future `/workspace/uploads/...` path to pass to `model_import`
+- required method, content type, content length, and expiry metadata
+
+Resolve `upload_path` against the MCP endpoint origin, then send the raw file:
+
+```http
+PUT /uploads/00000000-0000-4000-8000-000000000000 HTTP/1.1
+Authorization: Bearer <AGENT_SLICER_TOKEN>
+Content-Type: application/octet-stream
+Content-Length: <exact upload_prepare bytes>
+
+<raw STL, OBJ, or 3MF bytes>
+```
+
+Tickets are consumed by the first authenticated `PUT`, including a failed one,
+and expire after 15 minutes by default. The server writes to a private staging
+file, rejects length or checksum mismatches, and publishes with a non-replacing
+atomic hard link. Failed uploads leave no importable partial file. Configure the
+byte limit with `AGENT_SLICER_MAX_UPLOAD_BYTES` and the ticket lifetime with
+`AGENT_SLICER_UPLOAD_TTL_MS`. The upload limit defaults to
+`AGENT_SLICER_MAX_IMPORT_BYTES` when that variable is set, otherwise 512 MiB.
 
 ## Projects, revisions, and jobs
 
@@ -143,6 +181,10 @@ validated from the same descriptor snapshot used for loading. They must be
 regular supported files beneath `/workspace`. The default import limit is
 512 MiB and is configurable with `AGENT_SLICER_MAX_IMPORT_BYTES`.
 
+Uploaded models are stored under `/workspace/uploads` with server-generated
+UUID filenames and the validated lowercase source extension. Original client
+filenames are retained only as ticket metadata and cannot select server paths.
+
 `gcode_export` and `project_save` accept only a single root-level filename, with
 the exact lowercase `.gcode` or `.3mf` extension. Absolute, nested, traversal,
 symlink, and wrong-extension targets are rejected. `overwrite` defaults to
@@ -184,14 +226,22 @@ Tool failures set `isError: true` and return
 MCP schema failures are reported by the MCP SDK before native execution. Adapter
 or image-validation failures use `mcp_adapter_error`.
 
+`upload_prepare` may return `invalid_filename`, `invalid_size`,
+`invalid_checksum`, `upload_too_large`, or `upload_storage_error`. The HTTP
+upload endpoint uses status-specific JSON errors including `upload_not_found`,
+`invalid_content_type`, `content_length_mismatch`, `checksum_mismatch`,
+`upload_too_large`, `upload_conflict`, and `upload_storage_error`.
+
 ## Minimal agent loop
 
 1. Call `slicer_status`; wait for `ready: true`.
-2. Call `project_create`.
-3. Import a workspace model using the returned project revision.
-4. Inspect with `scene_get`; transform or arrange using the latest revision.
-5. Select presets, discover settings, and apply typed changes.
-6. Start slicing, poll its job, export its G-code, then optionally save the 3MF.
+2. For a local model, call `upload_prepare`, complete its authenticated PUT, and
+   retain the returned `workspace_path`.
+3. Call `project_create`.
+4. Import the workspace model using the returned project revision.
+5. Inspect with `scene_get`; transform or arrange using the latest revision.
+6. Select presets, discover settings, and apply typed changes.
+7. Start slicing, poll its job, export its G-code, then optionally save the 3MF.
 
 Example mutation and poll:
 

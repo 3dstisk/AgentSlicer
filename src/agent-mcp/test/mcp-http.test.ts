@@ -1,7 +1,8 @@
-import { access, mkdir, mkdtemp, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 import { afterEach, describe, expect, it } from "vitest";
@@ -33,16 +34,20 @@ async function startMcp(options: {
   onDesktopCapture?: () => Promise<void> | void;
   readPng?: ToolDependencies["readPng"];
   removePng?: ToolDependencies["removePng"];
+  maxUploadBytes?: number;
+  uploadTtlMs?: number;
   bridgeCall?: (method: string, params: Record<string, unknown>) => unknown | Promise<unknown>;
 } = {}): Promise<{
   client: Client;
   calls: Array<[string, Record<string, unknown>]>;
   endpoint: URL;
   renderPaths: string[];
+  workspaceRoot: string;
 }> {
   const directory = await mkdtemp(join(tmpdir(), "agent-mcp-http-"));
   const renderRoot = join(directory, "mcp");
   const desktopRoot = join(directory, "desktop");
+  const workspaceRoot = join(directory, "workspace");
   await mkdir(renderRoot);
   await mkdir(desktopRoot);
   const renderViews = options.renderViews ?? ["iso"];
@@ -249,6 +254,9 @@ async function startMcp(options: {
     desktopCaptureExecutable: "/unused",
     desktopScreenshotRoot: desktopRoot,
     maxImageBytes: 1024,
+    workspaceRoot,
+    maxUploadBytes: options.maxUploadBytes ?? 1024 * 1024,
+    uploadTtlMs: options.uploadTtlMs ?? 60_000,
     allowedHosts: ["127.0.0.1"],
     allowedOrigins: ["127.0.0.1"],
     ...(options.bearerToken ? { bearerToken: options.bearerToken } : {}),
@@ -279,7 +287,7 @@ async function startMcp(options: {
     async () => http.close(),
     () => rm(directory, { recursive: true, force: true }),
   );
-  return { client, calls, endpoint, renderPaths };
+  return { client, calls, endpoint, renderPaths, workspaceRoot };
 }
 
 async function rawRequest(
@@ -287,6 +295,7 @@ async function rawRequest(
   path: string,
   method = "GET",
   headers: Record<string, string> = {},
+  requestBody?: Buffer,
 ): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: unknown }> {
   const url = new URL(path, endpoint);
   return new Promise((resolve, reject) => {
@@ -303,7 +312,7 @@ async function rawRequest(
       });
     });
     outgoing.once("error", reject);
-    outgoing.end();
+    outgoing.end(requestBody);
   });
 }
 
@@ -431,10 +440,164 @@ describe("Streamable HTTP MCP server", () => {
     expect(
       listed.tools.find((tool) => tool.name === "settings_apply")?.description,
     ).toContain("printer, process, or filament");
+    expect(
+      listed.tools.find((tool) => tool.name === "upload_prepare")?.description,
+    ).toContain("agentslicer://docs/upload");
 
     const created = await client.callTool({ name: "project_create", arguments: {} });
     expect(created.structuredContent).toEqual({ project_id: "project-1", revision: 1 });
     expect(calls).toContainEqual(["project_create", {}]);
+  });
+
+  it("advertises the upload workflow as an MCP resource", async () => {
+    const { client } = await startMcp({ maxUploadBytes: 4096, uploadTtlMs: 12_345 });
+
+    const listed = await client.listResources();
+    expect(listed.resources).toContainEqual(expect.objectContaining({
+      uri: "agentslicer://docs/upload",
+      name: "upload-guide",
+      mimeType: "text/markdown",
+    }));
+
+    const resource = await client.readResource({ uri: "agentslicer://docs/upload" });
+    expect(resource.contents).toHaveLength(1);
+    expect(resource.contents[0]).toMatchObject({
+      uri: "agentslicer://docs/upload",
+      mimeType: "text/markdown",
+    });
+    expect(resource.contents[0]).toHaveProperty("text");
+    const text = "text" in resource.contents[0]! ? resource.contents[0].text : "";
+    expect(text).toContain("upload_prepare");
+    expect(text).toContain("4096 bytes");
+    expect(text).toContain("12345 milliseconds");
+  });
+
+  it("uploads verified bytes once and imports the returned workspace path", async () => {
+    const token = "deployment-secret";
+    const { client, calls, endpoint, workspaceRoot } = await startMcp({ bearerToken: token });
+    const model = Buffer.from("solid upload-test\nendsolid upload-test\n");
+    const sha256 = createHash("sha256").update(model).digest("hex");
+    const prepared = await client.callTool({
+      name: "upload_prepare",
+      arguments: { filename: "upload-test.stl", bytes: model.length, sha256 },
+    });
+    expect(prepared.isError).not.toBe(true);
+    expect(prepared.structuredContent).toMatchObject({
+      method: "PUT",
+      filename: "upload-test.stl",
+      bytes: model.length,
+      sha256,
+      content_type: "application/octet-stream",
+      workspace_path: expect.stringMatching(/^\/workspace\/uploads\/.+\.stl$/),
+    });
+    const preparedContent = prepared.structuredContent as Record<string, unknown>;
+    const uploadPath = String(preparedContent.upload_path);
+    const workspacePath = String(preparedContent.workspace_path);
+    const uploadHeaders = {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/octet-stream",
+      "content-length": String(model.length),
+    };
+
+    const unauthorized = await rawRequest(
+      endpoint,
+      uploadPath,
+      "PUT",
+      { ...uploadHeaders, authorization: "Bearer wrong-secret" },
+      model,
+    );
+    expect(unauthorized).toMatchObject({ status: 401, body: { error: "unauthorized" } });
+
+    const rejectedHost = await rawRequest(
+      endpoint,
+      uploadPath,
+      "PUT",
+      { ...uploadHeaders, host: "attacker.example" },
+      model,
+    );
+    expect(rejectedHost.status).toBe(403);
+    const rejectedOrigin = await rawRequest(
+      endpoint,
+      uploadPath,
+      "PUT",
+      { ...uploadHeaders, origin: "https://attacker.example" },
+      model,
+    );
+    expect(rejectedOrigin.status).toBe(403);
+
+    const uploaded = await rawRequest(endpoint, uploadPath, "PUT", uploadHeaders, model);
+    expect(uploaded).toMatchObject({
+      status: 201,
+      body: { ok: true, workspace_path: workspacePath, bytes: model.length, sha256 },
+    });
+    await expect(
+      readFile(join(workspaceRoot, "uploads", basename(workspacePath))),
+    ).resolves.toEqual(model);
+
+    const reused = await rawRequest(endpoint, uploadPath, "PUT", uploadHeaders, model);
+    expect(reused).toMatchObject({ status: 404, body: { error: "upload_not_found" } });
+
+    await client.callTool({ name: "project_create", arguments: {} });
+    await client.callTool({
+      name: "model_import",
+      arguments: {
+        project_id: "project-1",
+        expected_revision: 1,
+        path: workspacePath,
+      },
+    });
+    expect(calls).toContainEqual([
+      "model_import",
+      { project_id: "project-1", expected_revision: 1, path: workspacePath },
+    ]);
+  });
+
+  it("rejects checksum mismatches without publishing partial uploads", async () => {
+    const token = "deployment-secret";
+    const { client, endpoint, workspaceRoot } = await startMcp({ bearerToken: token });
+    const expected = Buffer.from("expected model bytes");
+    const actual = Buffer.from("different model byte");
+    expect(actual.length).toBe(expected.length);
+    const prepared = await client.callTool({
+      name: "upload_prepare",
+      arguments: {
+        filename: "checksum.obj",
+        bytes: expected.length,
+        sha256: createHash("sha256").update(expected).digest("hex"),
+      },
+    });
+    const preparedContent = prepared.structuredContent as Record<string, unknown>;
+    const response = await rawRequest(
+      endpoint,
+      String(preparedContent.upload_path),
+      "PUT",
+      {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/octet-stream",
+        "content-length": String(actual.length),
+      },
+      actual,
+    );
+
+    expect(response).toMatchObject({ status: 422, body: { error: "checksum_mismatch" } });
+    await expect(readdir(join(workspaceRoot, "uploads"))).resolves.toEqual([]);
+  });
+
+  it("enforces configured upload limits before issuing a ticket", async () => {
+    const { client } = await startMcp({ maxUploadBytes: 4 });
+    const prepared = await client.callTool({
+      name: "upload_prepare",
+      arguments: {
+        filename: "too-large.3mf",
+        bytes: 5,
+        sha256: "a".repeat(64),
+      },
+    });
+
+    expect(prepared.isError).toBe(true);
+    expect(prepared.structuredContent).toMatchObject({
+      error: { code: "upload_too_large", message: expect.stringContaining("4 byte") },
+    });
   });
 
   it("returns native renders as structured metadata plus PNG image content", async () => {

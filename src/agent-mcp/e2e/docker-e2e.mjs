@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
-import { mkdir, rm, stat, symlink, truncate, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, symlink, truncate, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
 
@@ -25,7 +25,9 @@ const outputsDir = resolve(
 const workspaceDir = resolve(
   process.env.AGENT_SLICER_E2E_WORKSPACE ?? `${repoRoot}/runtime/workspace`,
 );
-const fixturePath = process.env.AGENT_SLICER_E2E_FIXTURE ?? "/workspace/20mm_cube.obj";
+const fixtureSourcePath = resolve(
+  process.env.AGENT_SLICER_E2E_FIXTURE_SOURCE ?? `${repoRoot}/tests/data/20mm_cube.obj`,
+);
 const importLimitBytes = Number(
   process.env.AGENT_SLICER_MAX_IMPORT_BYTES ?? 512 * 1024 * 1024,
 );
@@ -460,6 +462,7 @@ try {
   const listed = await client.listTools();
   const requiredTools = [
     "slicer_status",
+    "upload_prepare",
     "project_create",
     "model_import",
     "scene_get",
@@ -491,6 +494,56 @@ try {
   record("MCP connected and native bridge ready", {
     protocol_version: status.protocol_version,
     capabilities: status.capabilities,
+  });
+
+  const resources = await client.listResources();
+  if (!resources.resources.some((resource) => resource.uri === "agentslicer://docs/upload")) {
+    throw new Error(`Upload documentation resource is missing: ${JSON.stringify(resources)}`);
+  }
+  const uploadGuide = await client.readResource({ uri: "agentslicer://docs/upload" });
+  const uploadGuideText = uploadGuide.contents
+    .filter((content) => content.uri === "agentslicer://docs/upload" && "text" in content)
+    .map((content) => content.text)
+    .join("\n");
+  if (!uploadGuideText.includes("upload_prepare") || !uploadGuideText.includes("model_import")) {
+    throw new Error("Upload documentation resource does not describe the upload/import flow");
+  }
+
+  const fixtureBytes = await readFile(fixtureSourcePath);
+  const fixtureSha256 = createHash("sha256").update(fixtureBytes).digest("hex");
+  const preparedUpload = (await call(client, "upload_prepare", {
+    filename: basename(fixtureSourcePath),
+    bytes: fixtureBytes.length,
+    sha256: fixtureSha256,
+  })).value;
+  const uploadResponse = await fetch(new URL(preparedUpload.upload_path, baseUrl), {
+    method: "PUT",
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/octet-stream",
+      "content-length": String(fixtureBytes.length),
+    },
+    body: fixtureBytes,
+  });
+  if (!uploadResponse.ok) {
+    throw new Error(
+      `Model upload returned ${uploadResponse.status}: ${await uploadResponse.text()}`,
+    );
+  }
+  const uploaded = await uploadResponse.json();
+  if (
+    uploaded.ok !== true ||
+    uploaded.workspace_path !== preparedUpload.workspace_path ||
+    uploaded.bytes !== fixtureBytes.length ||
+    uploaded.sha256 !== fixtureSha256
+  ) {
+    throw new Error(`Invalid upload result: ${JSON.stringify(uploaded)}`);
+  }
+  const fixturePath = preparedUpload.workspace_path;
+  record("uploaded fixture through authenticated one-time endpoint", {
+    workspace_path: fixturePath,
+    bytes: fixtureBytes.length,
+    sha256: fixtureSha256,
   });
 
   let project = (await call(client, "project_create", {})).value;

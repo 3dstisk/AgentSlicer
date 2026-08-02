@@ -146,7 +146,6 @@ jobs:
           PGID="$(id -g)"
           export PUID PGID
           mkdir -p runtime/workspace runtime/e2e-artifacts runtime/outputs
-          cp tests/data/20mm_cube.obj runtime/workspace/20mm_cube.obj
           cleanup() {
             status=$?
             docker compose -f compose.yaml logs --no-color > runtime/e2e-artifacts/docker-compose.log 2>&1 || true

@@ -6,6 +6,11 @@ import { z } from "zod";
 import { BridgeError } from "./bridge-client.js";
 import { readInternalPng, readPngBuffer, unlinkInternalPng } from "./images.js";
 import type { BridgeCaller, DesktopCaptureAdapter } from "./types.js";
+import {
+  isSupportedUploadFilename,
+  UploadError,
+  type UploadPreparer,
+} from "./uploads.js";
 
 const opaqueId = z.string().min(1).max(128);
 const revision = z.number().int().nonnegative();
@@ -245,6 +250,20 @@ function artifactPath(extension: ".gcode" | ".3mf") {
 
 export const toolSchemas = {
   slicer_status: z.object({}).strict(),
+  upload_prepare: z
+    .object({
+      filename: z
+        .string()
+        .min(1)
+        .max(255)
+        .refine(
+          isSupportedUploadFilename,
+          "filename must be a root-level STL, OBJ, or 3MF filename",
+        ),
+      bytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+      sha256: z.string().regex(/^[0-9a-f]{64}$/i),
+    })
+    .strict(),
   project_create: z.object({}).strict(),
   model_import: z
     .object({
@@ -406,6 +425,7 @@ export const toolSchemas = {
 
 export const toolNames = [
   "slicer_status",
+  "upload_prepare",
   "project_create",
   "model_import",
   "scene_get",
@@ -425,6 +445,7 @@ export const toolNames = [
 ] as const;
 
 type ToolName = (typeof toolNames)[number];
+type BridgeToolName = Exclude<ToolName, "upload_prepare">;
 
 export interface ToolDependencies {
   bridge: BridgeCaller;
@@ -436,10 +457,17 @@ export interface ToolDependencies {
   removePng?: typeof unlinkInternalPng;
 }
 
+export interface AgentToolDependencies extends ToolDependencies {
+  uploads: UploadPreparer;
+}
+
 const descriptions: Record<ToolName, string> = {
   slicer_status: "Report native Orca bridge readiness, active project, revision, jobs, and capabilities.",
+  upload_prepare:
+    "Create a single-use authenticated HTTP upload ticket for a local STL, OBJ, or 3MF file. PUT the raw bytes to the returned same-origin upload_path, then pass workspace_path to model_import. Detailed guidance is available at agentslicer://docs/upload.",
   project_create: "Reset Orca to a new empty project and return its opaque project id and revision.",
-  model_import: "Import an STL, 3MF, or OBJ model from the container's /workspace volume.",
+  model_import:
+    "Import an STL, 3MF, or OBJ model already present beneath /workspace. For local client files, call upload_prepare and complete its HTTP PUT first; see agentslicer://docs/upload.",
   scene_get: "Inspect objects, instances, transforms, bounds, plates, and the current revision.",
   object_transform: "Move, rotate, scale, or place one model instance on the bed.",
   scene_arrange: "Start Orca's native arrange operation for the active project.",
@@ -512,6 +540,26 @@ const statusResultSchema = z
     revision,
     job_count: z.number().int().nonnegative(),
     capabilities: z.array(z.string()),
+  })
+  .strict();
+const uploadPreparationResultSchema = z
+  .object({
+    upload_id: opaqueId,
+    upload_path: z.string().startsWith("/uploads/"),
+    workspace_path: z.string().startsWith("/workspace/uploads/"),
+    filename: z.string(),
+    bytes: z.number().int().positive(),
+    sha256: z.string().regex(/^[0-9a-f]{64}$/),
+    method: z.literal("PUT"),
+    content_type: z.literal("application/octet-stream"),
+    expires_at: z.string().datetime(),
+    required_headers: z
+      .object({
+        authorization: z.literal("Bearer <same token used for MCP>"),
+        content_type: z.literal("application/octet-stream"),
+        content_length: z.string().regex(/^\d+$/),
+      })
+      .strict(),
   })
   .strict();
 const importResultSchema = z
@@ -926,7 +974,7 @@ function replacementConflictDuringDesktopCapture(
  * Keep the native bridge's compact array/topfront representation isolated here.
  */
 export function toBridgeParams(
-  method: ToolName | "project_get",
+  method: BridgeToolName | "project_get",
   params: Record<string, unknown>,
 ): Record<string, unknown> {
   if (method === "object_transform") {
@@ -960,7 +1008,12 @@ export function toolErrorResult(error: unknown): CallToolResult {
           message: error.message,
           ...(error.details !== undefined ? { details: error.details } : {}),
         }
-      : {
+      : error instanceof UploadError
+        ? {
+            code: error.code,
+            message: error.message,
+          }
+        : {
           code: "mcp_adapter_error",
           message: error instanceof Error ? error.message : String(error),
         };
@@ -974,7 +1027,7 @@ export function toolErrorResult(error: unknown): CallToolResult {
 
 async function bridgeTool(
   dependencies: ToolDependencies,
-  method: ToolName,
+  method: BridgeToolName,
   params: Record<string, unknown>,
   resultSchema: z.ZodType<Record<string, unknown>>,
 ): Promise<CallToolResult> {
@@ -1192,7 +1245,7 @@ async function desktopCapture(
   }
 }
 
-export function registerAgentTools(server: McpServer, dependencies: ToolDependencies): void {
+export function registerAgentTools(server: McpServer, dependencies: AgentToolDependencies): void {
   server.registerTool(
     "slicer_status",
     {
@@ -1201,6 +1254,22 @@ export function registerAgentTools(server: McpServer, dependencies: ToolDependen
       outputSchema: statusResultSchema,
     },
     () => bridgeTool(dependencies, "slicer_status", {}, statusResultSchema),
+  );
+  server.registerTool(
+    "upload_prepare",
+    {
+      description: descriptions.upload_prepare,
+      inputSchema: toolSchemas.upload_prepare,
+      outputSchema: uploadPreparationResultSchema,
+    },
+    async (params) => {
+      try {
+        const prepared = await dependencies.uploads.prepare(params);
+        return successResult(uploadPreparationResultSchema.parse(prepared));
+      } catch (error) {
+        return toolErrorResult(error);
+      }
+    },
   );
   server.registerTool(
     "project_create",

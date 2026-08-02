@@ -10,6 +10,9 @@ export interface AgentMcpConfig {
   desktopCaptureExecutable: string;
   desktopScreenshotRoot: string;
   maxImageBytes: number;
+  workspaceRoot: string;
+  maxUploadBytes: number;
+  uploadTtlMs: number;
   allowedHosts: readonly string[];
   allowedOrigins: readonly string[];
   bearerToken?: string;
@@ -83,6 +86,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AgentMcpConfig
       16 * 1024 * 1024,
       "AGENT_SLICER_MAX_IMAGE_BYTES",
     ),
+    workspaceRoot: "/workspace",
+    maxUploadBytes: positiveInteger(
+      env.AGENT_SLICER_MAX_UPLOAD_BYTES ?? env.AGENT_SLICER_MAX_IMPORT_BYTES,
+      512 * 1024 * 1024,
+      "AGENT_SLICER_MAX_UPLOAD_BYTES",
+    ),
+    uploadTtlMs: positiveInteger(
+      env.AGENT_SLICER_UPLOAD_TTL_MS,
+      15 * 60 * 1000,
+      "AGENT_SLICER_UPLOAD_TTL_MS",
+    ),
     allowedHosts: (env.AGENT_SLICER_ALLOWED_HOSTS ?? "localhost,127.0.0.1,[::1]")
       .split(",")
       .map((host) => host.trim())
@@ -96,6 +110,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AgentMcpConfig
 
   if (config.port > 65_535) {
     throw new Error("AGENT_SLICER_MCP_PORT must be at most 65535");
+  }
+  if (config.uploadTtlMs > 24 * 60 * 60 * 1000) {
+    throw new Error("AGENT_SLICER_UPLOAD_TTL_MS must be at most 86400000");
   }
   if (config.allowedHosts.length === 0 || config.allowedOrigins.length === 0) {
     throw new Error("Host and Origin allowlists must not be empty");
