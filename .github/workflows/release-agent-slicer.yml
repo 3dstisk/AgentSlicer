@@ -51,7 +51,7 @@ jobs:
       artifact: ${{ github.sha }}-tests-linux-x86_64
 
   publish:
-    name: Test image and publish tagged builds
+    name: Test image and publish push builds
     needs: [build-linux-x86_64, test-linux-x86_64]
     runs-on: ubuntu-24.04
     permissions:
@@ -99,7 +99,7 @@ jobs:
           npm test --prefix src/agent-mcp
 
       - name: Log in to GitHub Container Registry
-        if: startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'push'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -113,8 +113,8 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/agentslicer
           tags: |
             type=ref,event=tag
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
-            type=sha,format=long,enable=${{ !startsWith(github.ref, 'refs/tags/') }}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' }}
+            type=sha,format=long,enable=${{ github.ref == 'refs/heads/main' }}
 
       - name: Build exact x86_64 container for E2E
         uses: docker/build-push-action@v7
@@ -171,7 +171,7 @@ jobs:
           retention-days: 14
 
       - name: Push tested container tags
-        if: startsWith(github.ref, 'refs/tags/')
+        if: github.event_name == 'push'
         env:
           IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
         shell: bash

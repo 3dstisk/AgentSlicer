@@ -4,7 +4,9 @@ The x86_64 image runs OrcaSlicer, its browser desktop, and the authenticated MCP
 server in one container. Main-branch pushes, manual runs, and tagged commits
 build a fresh AppImage, package it into the image, run the Linux x86_64 native
 unit tests (including the agent bridge), and run the complete Docker E2E.
-Tagged commits publish the tested image.
+Successful main-branch pushes publish `latest` and an immutable SHA tag. Tagged
+commits publish the version tag and update `latest`; manual runs only verify the
+image.
 
 The authoritative v1 tool and security contract is in
 [the MCP API documentation](../../docs/mcp-api.md).
