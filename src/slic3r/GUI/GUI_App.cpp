@@ -844,52 +844,107 @@ static bool bootstrap_agent_presets(PresetBundle& bundle, AppConfig& config,
     if (app_config_exists)
         return true;
 
-    static const std::string vendor = PresetBundle::ORCA_DEFAULT_BUNDLE;
-    // AppConfig stores the vendor profile's model identifier (the machine-model
-    // name), not its hardware model_id field.
-    static const std::string model = "Generic ToolChanger Printer";
+    static const std::string vendor = "BBL";
+    static const std::string model = "Bambu Lab H2S";
     static const std::string variant = "0.4";
-    static const std::string printer = "MyToolChanger 0.4 nozzle";
-    static const std::string process = "0.20mm Standard @MyToolChanger";
-    static const std::string filament = "Generic PLA @MyToolChanger";
+    static const std::string printer = "Bambu Lab H2S 0.4 nozzle";
+    static const std::string process = "0.20mm Standard @BBL H2S";
+    static const std::string filament = "Generic PLA @BBL H2S";
 
-    const AppConfig::VendorMap vendors {
+    const AppConfig::VendorMap bootstrap_vendors {
         {vendor, {{model, {variant}}}}
     };
-    const std::map<std::string, std::string> filaments {
+    const std::map<std::string, std::string> bootstrap_filaments {
         {filament, "true"}
     };
 
     try {
         BOOST_LOG_TRIVIAL(info)
-            << "Bootstrapping bundled Custom presets for AgentSlicer";
+            << "Installing bundled Bambu Lab presets for AgentSlicer";
+        if (!bundle.apply_vendor_config(
+                bootstrap_vendors, bootstrap_filaments, &config, false,
+                model, variant, filament)) {
+            BOOST_LOG_TRIVIAL(error)
+                << "AgentSlicer preset bootstrap failed while installing Bambu Lab presets";
+            return false;
+        }
+
+        const auto vendor_it = bundle.vendors.find(vendor);
+        if (vendor_it == bundle.vendors.end()) {
+            BOOST_LOG_TRIVIAL(error)
+                << "AgentSlicer preset bootstrap could not find the installed Bambu Lab vendor";
+            return false;
+        }
+
+        AppConfig::VendorMap vendors;
+        for (const VendorProfile::PrinterModel& printer_model : vendor_it->second.models) {
+            for (const VendorProfile::PrinterVariant& printer_variant : printer_model.variants)
+                vendors[vendor][printer_model.id].insert(printer_variant.name);
+        }
+
+        std::map<std::string, std::string> filaments;
+        for (const Preset& preset : bundle.filaments) {
+            if (preset.vendor != nullptr && preset.vendor->id == vendor &&
+                boost::algorithm::starts_with(preset.name, "Generic ") &&
+                !boost::algorithm::ends_with(preset.name, " @base")) {
+                filaments.emplace(preset.name, "true");
+            }
+        }
+
+        if (vendors[vendor].empty() || filaments.empty()) {
+            BOOST_LOG_TRIVIAL(error)
+                << "AgentSlicer preset bootstrap found no Bambu Lab printers or Generic filaments";
+            return false;
+        }
+
         if (!bundle.apply_vendor_config(
                 vendors, filaments, &config, false, model, variant, filament)) {
             BOOST_LOG_TRIVIAL(error)
-                << "AgentSlicer preset bootstrap failed while applying Custom vendor configuration";
+                << "AgentSlicer preset bootstrap failed while enabling Bambu Lab presets";
             return false;
+        }
+
+        bool all_printers_visible = true;
+        size_t printer_count = 0;
+        for (const auto& [printer_model, printer_variants] : vendors.at(vendor)) {
+            for (const std::string& printer_variant : printer_variants) {
+                ++printer_count;
+                const Preset* preset = bundle.printers.find_system_preset_by_model_and_variant(
+                    printer_model, printer_variant);
+                all_printers_visible = all_printers_visible &&
+                    preset != nullptr && preset->is_visible;
+            }
+        }
+
+        bool all_generic_filaments_visible = true;
+        for (const auto& [name, _] : filaments) {
+            const Preset* preset = bundle.filaments.find_preset(name, false, true);
+            all_generic_filaments_visible = all_generic_filaments_visible &&
+                preset != nullptr && preset->is_visible;
         }
 
         const bool valid =
             bundle.printers.get_selected_preset_name() == printer &&
             bundle.prints.get_selected_preset_name() == process &&
-            bundle.filament_presets.size() == 5 &&
-            std::all_of(
-                bundle.filament_presets.begin(), bundle.filament_presets.end(),
-                [](const std::string& name) { return name == filament; });
+            bundle.filament_presets == std::vector<std::string>{filament} &&
+            all_printers_visible && all_generic_filaments_visible;
         if (!valid) {
             BOOST_LOG_TRIVIAL(error)
                 << "AgentSlicer preset bootstrap produced an unexpected selection: printer="
                 << bundle.printers.get_selected_preset_name()
                 << ", process=" << bundle.prints.get_selected_preset_name()
-                << ", filament_count=" << bundle.filament_presets.size();
+                << ", filament_count=" << bundle.filament_presets.size()
+                << ", all_printers_visible=" << all_printers_visible
+                << ", all_generic_filaments_visible=" << all_generic_filaments_visible;
             return false;
         }
 
         config.save();
         BOOST_LOG_TRIVIAL(info)
             << "AgentSlicer preset bootstrap selected " << printer
-            << ", " << process << ", and five " << filament << " presets";
+            << ", " << process << ", and " << filament
+            << "; enabled " << printer_count << " Bambu Lab printer presets and "
+            << filaments.size() << " Generic filament presets";
         bootstrapped = true;
         return true;
     } catch (const std::exception& error) {

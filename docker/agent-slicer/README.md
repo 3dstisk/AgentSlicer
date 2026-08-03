@@ -71,9 +71,11 @@ the native Orca bridge to be ready. Compose waits on `/readyz`. Override
 `AGENT_SLICER_ALLOWED_HOSTS` or `AGENT_SLICER_ALLOWED_ORIGINS` only when placing
 the localhost service behind a trusted proxy.
 
-On a fresh AgentSlicer configuration, Orca installs and selects its bundled
-Custom ToolChanger 0.4 mm profiles automatically. Existing user configurations
-are left unchanged, and the native bridge stays unavailable if bootstrap fails.
+On a fresh AgentSlicer configuration, Orca enables every bundled Bambu Lab
+printer/nozzle preset and every selectable Bambu-compatible Generic filament
+profile automatically. Bambu Lab H2S 0.4 mm, its 0.20 mm Standard process, and
+Generic PLA are selected initially. Existing user configurations are left
+unchanged, and the native bridge stays unavailable if bootstrap fails.
 
 The image uses X11 with Mesa llvmpipe so screenshots remain available without a
 GPU. The Selkies desktop disables file transfer, command execution, nested

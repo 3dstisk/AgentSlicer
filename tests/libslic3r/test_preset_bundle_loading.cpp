@@ -1,6 +1,7 @@
 #include <catch2/catch_all.hpp>
 
 #include <algorithm>
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem.hpp>
 
 #include "libslic3r/PresetBundle.hpp"
@@ -194,7 +195,7 @@ TEST_CASE("Printer extruder count tolerates missing nozzle diameter", "[Preset][
     CHECK(bundle.get_printer_extruder_count() == 2);
 }
 
-TEST_CASE("Custom toolchanger bootstrap selects requested defaults", "[Preset][Bundle][Regression]")
+TEST_CASE("AgentSlicer bootstrap enables Bambu printers and Generic filaments", "[Preset][Bundle][Regression]")
 {
     ScopedPresetEnvironment environment;
     PresetBundle            bundle;
@@ -202,29 +203,71 @@ TEST_CASE("Custom toolchanger bootstrap selects requested defaults", "[Preset][B
 
     bundle.setup_directories();
 
-    const AppConfig::VendorMap vendors {
-        {"Custom", {{"Generic ToolChanger Printer", {"0.4"}}}}
+    const AppConfig::VendorMap bootstrap_vendors {
+        {"BBL", {{"Bambu Lab H2S", {"0.4"}}}}
     };
-    const std::map<std::string, std::string> filaments {
-        {"Generic PLA @MyToolChanger", "true"}
+    const std::map<std::string, std::string> bootstrap_filaments {
+        {"Generic PLA @BBL H2S", "true"}
     };
 
+    REQUIRE(bundle.apply_vendor_config(
+        bootstrap_vendors,
+        bootstrap_filaments,
+        &config,
+        false,
+        "Bambu Lab H2S",
+        "0.4",
+        "Generic PLA @BBL H2S"));
+
+    const auto vendor_it = bundle.vendors.find("BBL");
+    REQUIRE(vendor_it != bundle.vendors.end());
+
+    AppConfig::VendorMap vendors;
+    for (const VendorProfile::PrinterModel& model : vendor_it->second.models) {
+        for (const VendorProfile::PrinterVariant& variant : model.variants)
+            vendors["BBL"][model.id].insert(variant.name);
+    }
+
+    std::map<std::string, std::string> filaments;
+    for (const Preset& preset : bundle.filaments) {
+        if (preset.vendor != nullptr && preset.vendor->id == "BBL" &&
+            preset.name.rfind("Generic ", 0) == 0 &&
+            !boost::algorithm::ends_with(preset.name, " @base")) {
+            filaments.emplace(preset.name, "true");
+        }
+    }
+
+    REQUIRE_FALSE(vendors["BBL"].empty());
+    REQUIRE_FALSE(filaments.empty());
     REQUIRE(bundle.apply_vendor_config(
         vendors,
         filaments,
         &config,
         false,
-        "Generic ToolChanger Printer",
+        "Bambu Lab H2S",
         "0.4",
-        "Generic PLA @MyToolChanger"));
+        "Generic PLA @BBL H2S"));
 
-    CHECK(bundle.printers.get_selected_preset_name() == "MyToolChanger 0.4 nozzle");
-    CHECK(bundle.prints.get_selected_preset_name() == "0.20mm Standard @MyToolChanger");
-    REQUIRE(bundle.filament_presets.size() == 5);
-    CHECK(std::all_of(
-        bundle.filament_presets.begin(),
-        bundle.filament_presets.end(),
-        [](const std::string& name) { return name == "Generic PLA @MyToolChanger"; }));
+    CHECK(bundle.printers.get_selected_preset_name() == "Bambu Lab H2S 0.4 nozzle");
+    CHECK(bundle.prints.get_selected_preset_name() == "0.20mm Standard @BBL H2S");
+    CHECK(bundle.filament_presets == std::vector<std::string>{"Generic PLA @BBL H2S"});
+
+    for (const auto& [model, variants] : vendors.at("BBL")) {
+        for (const std::string& variant : variants) {
+            const Preset* preset = bundle.printers.find_system_preset_by_model_and_variant(
+                model, variant);
+            CAPTURE(model, variant);
+            REQUIRE(preset != nullptr);
+            CHECK(preset->is_visible);
+        }
+    }
+
+    for (const auto& [name, _] : filaments) {
+        const Preset* preset = bundle.filaments.find_preset(name, false, true);
+        CAPTURE(name);
+        REQUIRE(preset != nullptr);
+        CHECK(preset->is_visible);
+    }
 }
 
 TEST_CASE("find_preset resolves a system preset's renamed_from", "[Preset][Rename]")

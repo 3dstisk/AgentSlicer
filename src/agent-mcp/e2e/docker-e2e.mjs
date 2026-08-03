@@ -47,6 +47,34 @@ function record(name, details = {}) {
   process.stdout.write(`[e2e] ${name}\n`);
 }
 
+async function bundledBambuPresetNames() {
+  const profilesRoot = resolve(repoRoot, "resources/profiles");
+  const manifest = JSON.parse(await readFile(resolve(profilesRoot, "BBL.json"), "utf8"));
+  const printers = [];
+  for (const entry of manifest.machine_model_list) {
+    const model = JSON.parse(
+      await readFile(resolve(profilesRoot, "BBL", entry.sub_path), "utf8"),
+    );
+    for (const nozzle of model.nozzle_diameter.split(";")) {
+      printers.push(`${model.name} ${nozzle} nozzle`);
+    }
+  }
+
+  const genericFilaments = [];
+  for (const entry of manifest.filament_list) {
+    if (!entry.name.startsWith("Generic ")) {
+      continue;
+    }
+    const filament = JSON.parse(
+      await readFile(resolve(profilesRoot, "BBL", entry.sub_path), "utf8"),
+    );
+    if (filament.instantiation === "true") {
+      genericFilaments.push(filament.name);
+    }
+  }
+  return { printers, genericFilaments };
+}
+
 function structured(result) {
   if (result.isError) {
     throw new Error(`Tool returned an error: ${JSON.stringify(result.structuredContent)}`);
@@ -775,9 +803,9 @@ try {
   });
 
   const bootstrapSelection = {
-    printer: "MyToolChanger 0.4 nozzle",
-    process: "0.20mm Standard @MyToolChanger",
-    filaments: Array(5).fill("Generic PLA @MyToolChanger"),
+    printer: "Bambu Lab H2S 0.4 nozzle",
+    process: "0.20mm Standard @BBL H2S",
+    filaments: ["Generic PLA @BBL H2S"],
   };
   let presets = (
     await call(client, "presets_list", {
@@ -796,6 +824,37 @@ try {
       throw new Error(`Bundled bootstrap ${scope} preset is unavailable: ${name}`);
     }
   }
+  const availablePrinterNames = new Set(
+    presets.presets
+      .filter((entry) => entry.scope === "printer")
+      .map((entry) => entry.name),
+  );
+  const bundledBambuPresets = await bundledBambuPresetNames();
+  const missingBambuPrinters = bundledBambuPresets.printers.filter(
+    (name) => !availablePrinterNames.has(name),
+  );
+  if (missingBambuPrinters.length > 0) {
+    throw new Error(
+      `Bundled Bambu Lab printer presets are unavailable: ${missingBambuPrinters.join(", ")}`,
+    );
+  }
+  const availableFilamentNames = new Set(
+    presets.presets
+      .filter((entry) => entry.scope === "filament")
+      .map((entry) => entry.name),
+  );
+  const missingGenericFilaments = bundledBambuPresets.genericFilaments.filter(
+    (name) => !availableFilamentNames.has(name),
+  );
+  if (missingGenericFilaments.length > 0) {
+    throw new Error(
+      `Bundled Bambu-compatible Generic filament profiles are unavailable: ${missingGenericFilaments.join(", ")}`,
+    );
+  }
+  record("listed every bundled Bambu Lab printer and Generic filament profiles", {
+    printer_count: bundledBambuPresets.printers.length,
+    generic_filament_count: bundledBambuPresets.genericFilaments.length,
+  });
   project = (
     await call(client, "presets_select", {
       project_id: project.project_id,
