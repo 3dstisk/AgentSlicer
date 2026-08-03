@@ -2,31 +2,8 @@ name: AgentSlicer x86_64 image
 
 on:
   push:
-    branches:
-      - main
     tags:
-      - "*"
-    paths:
-      - ".github/actions/**"
-      - ".github/workflows/build_check_cache.yml"
-      - ".github/workflows/build_deps.yml"
-      - ".github/workflows/build_orca.yml"
-      - ".github/workflows/release-agent-slicer.yml"
-      - ".github/workflows/unit_tests.yml"
-      - "CMakeLists.txt"
-      - "**/CMakeLists.txt"
-      - "build_linux.sh"
-      - "compose*.yaml"
-      - "deps/**"
-      - "deps_src/**"
-      - "docker/**"
-      - "localization/**"
-      - "resources/**"
-      - "scripts/**"
-      - "src/**"
-      - "tests/**"
-      - "version.inc"
-  workflow_dispatch:
+      - "**"
 
 permissions:
   contents: read
