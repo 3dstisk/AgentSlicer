@@ -11,6 +11,7 @@ export interface AgentMcpConfig {
   desktopScreenshotRoot: string;
   maxImageBytes: number;
   workspaceRoot: string;
+  outputRoot: string;
   maxUploadBytes: number;
   uploadTtlMs: number;
   allowedHosts: readonly string[];
@@ -87,6 +88,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AgentMcpConfig
       "AGENT_SLICER_MAX_IMAGE_BYTES",
     ),
     workspaceRoot: "/workspace",
+    outputRoot: "/outputs",
     maxUploadBytes: positiveInteger(
       env.AGENT_SLICER_MAX_UPLOAD_BYTES ?? env.AGENT_SLICER_MAX_IMPORT_BYTES,
       512 * 1024 * 1024,

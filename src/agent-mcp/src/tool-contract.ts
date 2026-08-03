@@ -488,8 +488,9 @@ const descriptions: Record<ToolName, string> = {
   slice_start: "Start slicing one zero-based plate and return immediately with a running job.",
   job_get: "Get the current state, progress, result, and error for an asynchronous job.",
   gcode_export:
-    "Export a successful slice job to a root-level .gcode filename beneath /outputs.",
-  project_save: "Save the active project to a root-level .3mf filename beneath /outputs.",
+    "Export a successful slice job to a root-level .gcode filename beneath /outputs. Download the successful result path from the MCP origin with the same bearer token.",
+  project_save:
+    "Save the active project to a root-level .3mf filename beneath /outputs. Download the successful result path from the MCP origin with the same bearer token.",
 };
 
 const projectResultSchema = z.object({ project_id: opaqueId, revision }).strict();

@@ -8,6 +8,8 @@ bridge inside the same container:
 Model bytes use the same authenticated origin through one-time
 `PUT /uploads/<upload_id>` requests and are published beneath `/workspace` only
 after exact length and SHA-256 verification.
+Generated files use that origin and bearer authentication through
+`GET /outputs/<filename>`.
 
 The native protocol version reported by `slicer_status` is `1`. MCP tool inputs
 and outputs are JSON; renders and desktop captures also return MCP image content.
@@ -17,7 +19,8 @@ check the native bridge.
 ## Transport and access control
 
 The default endpoint is `http://127.0.0.1:8765/mcp`. When configured, every MCP
-request and upload must send `Authorization: Bearer <AGENT_SLICER_TOKEN>`.
+request, upload, and output download must send
+`Authorization: Bearer <AGENT_SLICER_TOKEN>`.
 Binding outside loopback without a token is rejected at startup.
 
 `AGENT_SLICER_ALLOWED_HOSTS` and `AGENT_SLICER_ALLOWED_ORIGINS` are comma-separated
@@ -85,6 +88,22 @@ atomic hard link. Failed uploads leave no importable partial file. Configure the
 byte limit with `AGENT_SLICER_MAX_UPLOAD_BYTES` and the ticket lifetime with
 `AGENT_SLICER_UPLOAD_TTL_MS`. The upload limit defaults to
 `AGENT_SLICER_MAX_IMPORT_BYTES` when that variable is set, otherwise 512 MiB.
+
+## Output downloads
+
+Resolve a successful `gcode_export` or `project_save` result path against the MCP
+endpoint origin and send the same bearer token used for MCP:
+
+```http
+GET /outputs/part.gcode HTTP/1.1
+Authorization: Bearer <AGENT_SLICER_TOKEN>
+```
+
+`GET /outputs/` returns the sorted paths of downloadable root-level `.gcode`
+and `.3mf` files. `GET` and `HEAD` are the only accepted methods. Downloads are
+served as attachments with `application/octet-stream`, no content sniffing, and
+no caching. Unsupported files, directories, traversal attempts, and symbolic
+links are not served.
 
 ## Projects, revisions, and jobs
 

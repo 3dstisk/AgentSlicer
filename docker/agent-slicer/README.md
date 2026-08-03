@@ -27,7 +27,7 @@ outputs, and screenshots writable without recursively changing their ownership.
 
 The GUI is at <http://localhost:3000>; MCP is at
 `http://127.0.0.1:8765/mcp`. Both are bound to localhost by default. MCP and
-`PUT /uploads/<upload_id>` requests must send
+`PUT /uploads/<upload_id>` and `GET /outputs/<filename>` requests must send
 `Authorization: Bearer $AGENT_SLICER_TOKEN`.
 
 Example HTTP MCP client entry:
@@ -56,7 +56,8 @@ change the 15-minute one-time ticket lifetime. Uploads are streamed, verified
 against the prepared SHA-256 and byte count, and published atomically under
 `runtime/workspace/uploads`.
 Exports and saves use private staging files and are published atomically beneath
-`runtime/outputs`.
+`runtime/outputs`. List them with authenticated `GET /outputs/` requests or
+download the exact result path returned by MCP using the same bearer token.
 
 To build the image locally, first place an x86_64 AppImage at
 `docker/agent-slicer/dist/OrcaSlicer.AppImage`, then run:

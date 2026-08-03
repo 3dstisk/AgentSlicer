@@ -24,6 +24,7 @@ describe("MCP configuration security", () => {
     const inherited = loadConfig({ AGENT_SLICER_MAX_IMPORT_BYTES: "4096" });
     expect(inherited.maxUploadBytes).toBe(4096);
     expect(inherited.workspaceRoot).toBe("/workspace");
+    expect(inherited.outputRoot).toBe("/outputs");
     expect(inherited.uploadTtlMs).toBe(15 * 60 * 1000);
 
     const overridden = loadConfig({

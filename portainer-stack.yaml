@@ -122,6 +122,13 @@ services:
         - "traefik.http.routers.3dstisk_agent_slicer_uploads.priority=110"
         - "traefik.http.routers.3dstisk_agent_slicer_uploads.service=3dstisk_agent_slicer_mcp"
 
+        # Generated outputs use the MCP service and the same bearer authentication.
+        - "traefik.http.routers.3dstisk_agent_slicer_outputs.rule=Host(`agent-slicer.3dstisk.com`) && (Path(`/outputs`) || PathPrefix(`/outputs/`))"
+        - "traefik.http.routers.3dstisk_agent_slicer_outputs.entrypoints=websecure"
+        - "traefik.http.routers.3dstisk_agent_slicer_outputs.tls=true"
+        - "traefik.http.routers.3dstisk_agent_slicer_outputs.priority=110"
+        - "traefik.http.routers.3dstisk_agent_slicer_outputs.service=3dstisk_agent_slicer_mcp"
+
         - "traefik.http.services.3dstisk_agent_slicer_mcp.loadbalancer.server.port=8765"
 
         - "traefik.swarm.network=nginx-proxy-public"

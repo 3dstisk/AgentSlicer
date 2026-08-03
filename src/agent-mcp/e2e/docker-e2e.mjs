@@ -444,6 +444,10 @@ const wrongStatus = await fetchStatus(endpoint, "Bearer definitely-wrong");
 if (wrongStatus !== 401) {
   throw new Error(`Wrong-token request returned ${wrongStatus}, expected 401`);
 }
+const missingOutputStatus = await fetchStatus(new URL("outputs/", baseUrl));
+if (missingOutputStatus !== 401) {
+  throw new Error(`Missing-token output request returned ${missingOutputStatus}, expected 401`);
+}
 record("authentication rejects missing and wrong bearer tokens");
 
 const rejectedHostStatus = await fetchRejectedMcpStatus({ host: "attacker.example" });
@@ -1167,6 +1171,44 @@ try {
   }
   if (!projectStat.isFile() || projectStat.size === 0) {
     throw new Error("Saved 3MF is missing or empty");
+  }
+
+  const outputHeaders = { authorization: `Bearer ${token}` };
+  const outputIndexResponse = await fetch(new URL("outputs/", baseUrl), {
+    headers: outputHeaders,
+  });
+  if (!outputIndexResponse.ok) {
+    throw new Error(
+      `Output index returned ${outputIndexResponse.status}: ${await outputIndexResponse.text()}`,
+    );
+  }
+  const outputIndex = await outputIndexResponse.json();
+  if (
+    !Array.isArray(outputIndex.outputs) ||
+    !outputIndex.outputs.includes(`/outputs/${gcodeName}`) ||
+    !outputIndex.outputs.includes(`/outputs/${projectName}`)
+  ) {
+    throw new Error(`Output index omitted generated files: ${JSON.stringify(outputIndex)}`);
+  }
+
+  for (const [filename, expectedSize] of [
+    [gcodeName, gcodeStat.size],
+    [projectName, projectStat.size],
+  ]) {
+    const response = await fetch(new URL(`outputs/${filename}`, baseUrl), {
+      headers: outputHeaders,
+    });
+    const downloaded = Buffer.from(await response.arrayBuffer());
+    if (
+      !response.ok ||
+      downloaded.length !== expectedSize ||
+      response.headers.get("content-disposition") !==
+        `attachment; filename*=UTF-8''${filename}`
+    ) {
+      throw new Error(
+        `Invalid output download for ${filename}: status=${response.status}, bytes=${downloaded.length}`,
+      );
+    }
   }
   record("exported non-empty G-code and 3MF with overwrite and path protections", {
     gcode_bytes: gcodeStat.size,

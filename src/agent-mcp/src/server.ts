@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
+import { pipeline } from "node:stream/promises";
 
 import { hostHeaderValidation, originValidation, toNodeHandler } from "@modelcontextprotocol/node";
 import {
@@ -16,6 +17,7 @@ import {
   type ToolDependencies,
 } from "./tool-contract.js";
 import { isUploadId, UploadError, UploadManager } from "./uploads.js";
+import { OutputManager } from "./outputs.js";
 
 export function createAgentMcpServer(dependencies: AgentToolDependencies): McpServer {
   const server = new McpServer({
@@ -37,6 +39,22 @@ export function createAgentMcpHandler(dependencies: AgentToolDependencies): McpH
 function sendJson(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, { "content-type": "application/json" });
   response.end(JSON.stringify(value));
+}
+
+function outputFilename(path: string): string | undefined {
+  const encoded = path.slice("/outputs/".length);
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    return undefined;
+  }
+}
+
+function encodedContentDisposition(filename: string): string {
+  const encoded = encodeURIComponent(filename).replace(/[!'()*]/g, (character) =>
+    `%${character.charCodeAt(0).toString(16).toUpperCase()}`
+  );
+  return `attachment; filename*=UTF-8''${encoded}`;
 }
 
 const HEALTH_SERVICE = "agent-slicer-mcp";
@@ -117,6 +135,7 @@ export function createAgentHttpServer(
     config.maxUploadBytes,
     config.uploadTtlMs,
   );
+  const outputs = new OutputManager(config.outputRoot);
   const handler = createAgentMcpHandler({ ...dependencies, uploads });
   const mcp = toNodeHandler(handler);
   const validateHost = hostHeaderValidation([...config.allowedHosts]);
@@ -157,7 +176,16 @@ export function createAgentHttpServer(
       }
       const uploadMatch = /^\/uploads\/([^/]+)$/.exec(path);
       const uploadId = uploadMatch?.[1];
-      if (path !== "/mcp" && (uploadId === undefined || !isUploadId(uploadId))) {
+      const isOutputIndex = path === "/outputs" || path === "/outputs/";
+      const requestedOutput = path.startsWith("/outputs/") && !isOutputIndex
+        ? outputFilename(path)
+        : undefined;
+      if (
+        path !== "/mcp" &&
+        (uploadId === undefined || !isUploadId(uploadId)) &&
+        !isOutputIndex &&
+        requestedOutput === undefined
+      ) {
         sendJson(response, 404, { error: "not_found" });
         return;
       }
@@ -166,6 +194,46 @@ export function createAgentHttpServer(
       }
       if (!authorized(request, config.bearerToken)) {
         sendJson(response, 401, { error: "unauthorized" });
+        return;
+      }
+      if (isOutputIndex) {
+        if (request.method !== "GET" && request.method !== "HEAD") {
+          response.setHeader("allow", "GET, HEAD");
+          sendJson(response, 405, { error: "method_not_allowed" });
+          return;
+        }
+        response.setHeader("cache-control", "no-store");
+        if (request.method === "HEAD") {
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end();
+          return;
+        }
+        sendJson(response, 200, { outputs: await outputs.list() });
+        return;
+      }
+      if (requestedOutput !== undefined) {
+        if (request.method !== "GET" && request.method !== "HEAD") {
+          response.setHeader("allow", "GET, HEAD");
+          sendJson(response, 405, { error: "method_not_allowed" });
+          return;
+        }
+        const output = await outputs.open(requestedOutput);
+        if (output === undefined) {
+          sendJson(response, 404, { error: "not_found" });
+          return;
+        }
+        response.setHeader("cache-control", "no-store");
+        response.setHeader("content-disposition", encodedContentDisposition(output.filename));
+        response.setHeader("content-length", output.bytes);
+        response.setHeader("content-type", "application/octet-stream");
+        response.setHeader("x-content-type-options", "nosniff");
+        if (request.method === "HEAD") {
+          await output.handle.close();
+          response.writeHead(200);
+          response.end();
+          return;
+        }
+        await pipeline(output.handle.createReadStream(), response);
         return;
       }
       if (uploadId !== undefined) {

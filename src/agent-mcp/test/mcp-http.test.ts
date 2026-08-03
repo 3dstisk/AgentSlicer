@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { access, mkdir, mkdtemp, readFile, readdir, rm, unlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -43,13 +43,16 @@ async function startMcp(options: {
   endpoint: URL;
   renderPaths: string[];
   workspaceRoot: string;
+  outputRoot: string;
 }> {
   const directory = await mkdtemp(join(tmpdir(), "agent-mcp-http-"));
   const renderRoot = join(directory, "mcp");
   const desktopRoot = join(directory, "desktop");
   const workspaceRoot = join(directory, "workspace");
+  const outputRoot = join(directory, "outputs");
   await mkdir(renderRoot);
   await mkdir(desktopRoot);
+  await mkdir(outputRoot);
   const renderViews = options.renderViews ?? ["iso"];
   const renderPaths = renderViews.map((_, index) => join(renderRoot, `render-${index}.png`));
   const renderPng = options.renderPng ?? PNG;
@@ -255,6 +258,7 @@ async function startMcp(options: {
     desktopScreenshotRoot: desktopRoot,
     maxImageBytes: 1024,
     workspaceRoot,
+    outputRoot,
     maxUploadBytes: options.maxUploadBytes ?? 1024 * 1024,
     uploadTtlMs: options.uploadTtlMs ?? 60_000,
     allowedHosts: ["127.0.0.1"],
@@ -287,7 +291,7 @@ async function startMcp(options: {
     async () => http.close(),
     () => rm(directory, { recursive: true, force: true }),
   );
-  return { client, calls, endpoint, renderPaths, workspaceRoot };
+  return { client, calls, endpoint, renderPaths, workspaceRoot, outputRoot };
 }
 
 async function rawRequest(
@@ -316,7 +320,91 @@ async function rawRequest(
   });
 }
 
+async function rawBufferRequest(
+  endpoint: URL,
+  path: string,
+  method = "GET",
+  headers: Record<string, string> = {},
+): Promise<{ status: number; headers: Record<string, string | string[] | undefined>; body: Buffer }> {
+  const url = new URL(path, endpoint);
+  return new Promise((resolve, reject) => {
+    const outgoing = httpRequest(url, { method, headers }, (response) => {
+      const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => chunks.push(chunk));
+      response.once("end", () => {
+        resolve({
+          status: response.statusCode ?? 0,
+          headers: response.headers,
+          body: Buffer.concat(chunks),
+        });
+      });
+    });
+    outgoing.once("error", reject);
+    outgoing.end();
+  });
+}
+
 describe("Streamable HTTP MCP server", () => {
+  it("lists and downloads outputs through the MCP bearer-auth boundary", async () => {
+    const { endpoint, outputRoot } = await startMcp({ bearerToken: "deployment-secret" });
+    await writeFile(join(outputRoot, "part.gcode"), "G1 X1\n");
+    await writeFile(join(outputRoot, "project.3mf"), Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+    await writeFile(join(outputRoot, "ignored.txt"), "not downloadable");
+    await mkdir(join(outputRoot, "nested.gcode"));
+    await symlink(join(outputRoot, "part.gcode"), join(outputRoot, "linked.gcode"));
+
+    await expect(rawRequest(endpoint, "/outputs/")).resolves.toMatchObject({
+      status: 401,
+      body: { error: "unauthorized" },
+    });
+    await expect(
+      rawRequest(endpoint, "/outputs/", "GET", { authorization: "Bearer deployment-secret" }),
+    ).resolves.toMatchObject({
+      status: 200,
+      body: { outputs: ["/outputs/part.gcode", "/outputs/project.3mf"] },
+    });
+
+    const downloaded = await rawBufferRequest(endpoint, "/outputs/part.gcode", "GET", {
+      authorization: "Bearer deployment-secret",
+    });
+    expect(downloaded).toMatchObject({
+      status: 200,
+      headers: {
+        "cache-control": "no-store",
+        "content-disposition": "attachment; filename*=UTF-8''part.gcode",
+        "content-length": "6",
+        "content-type": "application/octet-stream",
+        "x-content-type-options": "nosniff",
+      },
+    });
+    expect(downloaded.body.toString("utf8")).toBe("G1 X1\n");
+
+    const head = await rawBufferRequest(endpoint, "/outputs/project.3mf", "HEAD", {
+      authorization: "Bearer deployment-secret",
+    });
+    expect(head.status).toBe(200);
+    expect(head.headers["content-length"]).toBe("4");
+    expect(head.body).toHaveLength(0);
+
+    for (const path of [
+      "/outputs/ignored.txt",
+      "/outputs/nested.gcode",
+      "/outputs/linked.gcode",
+      "/outputs/nested%2Fescape.gcode",
+      "/outputs/%E0%A4%A.gcode",
+    ]) {
+      await expect(
+        rawRequest(endpoint, path, "GET", { authorization: "Bearer deployment-secret" }),
+      ).resolves.toMatchObject({ status: 404, body: { error: "not_found" } });
+    }
+
+    const wrongMethod = await rawRequest(endpoint, "/outputs/part.gcode", "POST", {
+      authorization: "Bearer deployment-secret",
+    });
+    expect(wrongMethod).toMatchObject({ status: 405, body: { error: "method_not_allowed" } });
+    expect(wrongMethod.headers.allow).toBe("GET, HEAD");
+  });
+
   it("reports unauthenticated liveness without calling the bridge", async () => {
     const { endpoint, calls } = await startMcp({ bearerToken: "deployment-secret" });
 
