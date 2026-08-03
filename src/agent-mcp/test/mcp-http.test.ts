@@ -443,6 +443,12 @@ describe("Streamable HTTP MCP server", () => {
     expect(
       listed.tools.find((tool) => tool.name === "upload_prepare")?.description,
     ).toContain("agentslicer://docs/upload");
+    expect(
+      listed.tools.find((tool) => tool.name === "scene_render")?.description,
+    ).toContain("inline MCP image content");
+    expect(
+      listed.tools.find((tool) => tool.name === "desktop_capture")?.description,
+    ).toContain("not an HTTP URL");
 
     const created = await client.callTool({ name: "project_create", arguments: {} });
     expect(created.structuredContent).toEqual({ project_id: "project-1", revision: 1 });
@@ -468,6 +474,7 @@ describe("Streamable HTTP MCP server", () => {
     expect(resource.contents[0]).toHaveProperty("text");
     const text = "text" in resource.contents[0]! ? resource.contents[0].text : "";
     expect(text).toContain("upload_prepare");
+    expect(text).toContain("/uploads");
     expect(text).toContain("4096 bytes");
     expect(text).toContain("12345 milliseconds");
   });
@@ -488,6 +495,7 @@ describe("Streamable HTTP MCP server", () => {
       bytes: model.length,
       sha256,
       content_type: "application/octet-stream",
+      upload_path: expect.stringMatching(/^\/uploads\/.+$/),
       workspace_path: expect.stringMatching(/^\/workspace\/uploads\/.+\.stl$/),
     });
     const preparedContent = prepared.structuredContent as Record<string, unknown>;

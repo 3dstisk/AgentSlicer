@@ -4,6 +4,7 @@
 #include "libslic3r/Platform.hpp"
 #include "GUI_App.hpp"
 #include "Agent/AgentBridge.hpp"
+#include "Agent/AgentPresetMigration.hpp"
 #include "GUI_Init.hpp"
 #include "GUI_ObjectList.hpp"
 #include "slic3r/GUI/UserManager.hpp"
@@ -839,9 +840,11 @@ static bool bootstrap_agent_presets(PresetBundle& bundle, AppConfig& config,
     const char* socket_path = std::getenv("AGENT_SLICER_BRIDGE_SOCKET");
     if (socket_path == nullptr || socket_path[0] == '\0')
         return true;
-    // Never mutate an existing user configuration during headless startup, even if it
-    // currently contains only default presets. Bootstrap is reserved for a fresh data dir.
-    if (app_config_exists)
+    // Preserve existing user configurations. The exact preset state created by older
+    // AgentSlicer images is migrated once so persistent /config volumes gain Bambu presets.
+    const bool migrate_legacy_bootstrap =
+        app_config_exists && Agent::has_legacy_preset_bootstrap(bundle, config);
+    if (app_config_exists && !migrate_legacy_bootstrap)
         return true;
 
     static const std::string vendor = "BBL";
@@ -860,7 +863,9 @@ static bool bootstrap_agent_presets(PresetBundle& bundle, AppConfig& config,
 
     try {
         BOOST_LOG_TRIVIAL(info)
-            << "Installing bundled Bambu Lab presets for AgentSlicer";
+            << (migrate_legacy_bootstrap ?
+                "Migrating legacy AgentSlicer presets to bundled Bambu Lab presets" :
+                "Installing bundled Bambu Lab presets for AgentSlicer");
         if (!bundle.apply_vendor_config(
                 bootstrap_vendors, bootstrap_filaments, &config, false,
                 model, variant, filament)) {
@@ -902,6 +907,12 @@ static bool bootstrap_agent_presets(PresetBundle& bundle, AppConfig& config,
             BOOST_LOG_TRIVIAL(error)
                 << "AgentSlicer preset bootstrap failed while enabling Bambu Lab presets";
             return false;
+        }
+
+        if (migrate_legacy_bootstrap && bundle.filament_presets.size() != 1) {
+            bundle.set_num_filaments(1);
+            bundle.set_filament_preset(0, filament);
+            bundle.export_selections(config);
         }
 
         bool all_printers_visible = true;

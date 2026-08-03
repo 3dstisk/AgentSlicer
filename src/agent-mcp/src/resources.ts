@@ -14,7 +14,8 @@ uploaded before calling \`model_import\`.
 
 1. Compute the file byte length and lowercase SHA-256 digest.
 2. Call \`upload_prepare\` with \`filename\`, \`bytes\`, and \`sha256\`.
-3. Resolve the returned \`upload_path\` against the MCP endpoint origin.
+3. Resolve the returned \`upload_path\`, which is beneath \`/uploads\`, against the MCP
+   endpoint origin.
 4. Send one authenticated HTTP \`PUT\` containing the raw file bytes. Use the same bearer
    token as MCP, \`Content-Type: application/octet-stream\`, and the exact returned
    \`Content-Length\`.

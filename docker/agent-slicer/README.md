@@ -74,12 +74,16 @@ the localhost service behind a trusted proxy.
 On a fresh AgentSlicer configuration, Orca enables every bundled Bambu Lab
 printer/nozzle preset and every selectable Bambu-compatible Generic filament
 profile automatically. Bambu Lab H2S 0.4 mm, its 0.20 mm Standard process, and
-Generic PLA are selected initially. Existing user configurations are left
-unchanged, and the native bridge stays unavailable if bootstrap fails.
+Generic PLA are selected initially. The exact MyToolChanger-only configuration
+created by earlier AgentSlicer images is migrated automatically; other existing
+user configurations are left unchanged. The native bridge stays unavailable if
+bootstrap fails.
 
 The image uses X11 with Mesa llvmpipe so screenshots remain available without a
 GPU. The Selkies desktop disables file transfer, command execution, nested
-Docker, and terminal-oriented desktop features.
+Docker, and terminal-oriented desktop features. Render and desktop PNGs are
+returned as inline MCP image content; `/screenshots` is internal storage, not an
+HTTP route.
 
 For a remote deployment, keep the container ports private, terminate TLS at a
 trusted reverse proxy, use a high-entropy token, and set exact Host and Origin

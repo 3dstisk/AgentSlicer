@@ -471,8 +471,10 @@ const descriptions: Record<ToolName, string> = {
   scene_get: "Inspect objects, instances, transforms, bounds, plates, and the current revision.",
   object_transform: "Move, rotate, scale, or place one model instance on the bed.",
   scene_arrange: "Start Orca's native arrange operation for the active project.",
-  scene_render: "Render one to six clean PNG views of the active scene for visual reasoning.",
-  desktop_capture: "Capture the complete Orca desktop for diagnostics, including modal dialogs.",
+  scene_render:
+    "Render one to six clean PNG views of the active scene as inline MCP image content. Returned paths are internal identifiers, not HTTP URLs.",
+  desktop_capture:
+    "Capture the complete Orca desktop as inline MCP image content for diagnostics, including modal dialogs. The returned path is not an HTTP URL.",
   presets_list:
     "List exact printer, process, and filament preset names and Orca's compatibility/selection state. Scopes are printer hardware, print process, and filament.",
   presets_select:

@@ -544,6 +544,9 @@ try {
     bytes: fixtureBytes.length,
     sha256: fixtureSha256,
   })).value;
+  if (!preparedUpload.upload_path.startsWith("/uploads/")) {
+    throw new Error(`Upload path is outside MCP routing: ${preparedUpload.upload_path}`);
+  }
   const uploadResponse = await fetch(new URL(preparedUpload.upload_path, baseUrl), {
     method: "PUT",
     headers: {

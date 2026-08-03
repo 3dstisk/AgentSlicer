@@ -7,6 +7,7 @@
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/Utils.hpp"
+#include "slic3r/GUI/Agent/AgentPresetMigration.hpp"
 
 using namespace Slic3r;
 
@@ -195,13 +196,49 @@ TEST_CASE("Printer extruder count tolerates missing nozzle diameter", "[Preset][
     CHECK(bundle.get_printer_extruder_count() == 2);
 }
 
-TEST_CASE("AgentSlicer bootstrap enables Bambu printers and Generic filaments", "[Preset][Bundle][Regression]")
+TEST_CASE("AgentSlicer bootstrap migrates its legacy toolchanger presets to Bambu", "[Preset][Bundle][Regression]")
 {
     ScopedPresetEnvironment environment;
     PresetBundle            bundle;
     AppConfig               config;
 
     bundle.setup_directories();
+
+    const AppConfig::VendorMap legacy_vendors {
+        {"Custom", {{"Generic ToolChanger Printer", {"0.4"}}}}
+    };
+    const std::map<std::string, std::string> legacy_filaments {
+        {"Generic PLA @MyToolChanger", "true"}
+    };
+
+    REQUIRE(bundle.apply_vendor_config(
+        legacy_vendors,
+        legacy_filaments,
+        &config,
+        false,
+        "Generic ToolChanger Printer",
+        "0.4",
+        "Generic PLA @MyToolChanger"));
+    CHECK(bundle.printers.get_selected_preset_name() == "MyToolChanger 0.4 nozzle");
+    CHECK(bundle.prints.get_selected_preset_name() == "0.20mm Standard @MyToolChanger");
+    CHECK(bundle.filament_presets ==
+          std::vector<std::string>(5, "Generic PLA @MyToolChanger"));
+    CHECK(config.vendors() == legacy_vendors);
+    REQUIRE(GUI::Agent::has_legacy_preset_bootstrap(bundle, config));
+
+    bundle.filament_presets.front() = "Customized PLA";
+    CHECK_FALSE(GUI::Agent::has_legacy_preset_bootstrap(bundle, config));
+    bundle.filament_presets.front() = "Generic PLA @MyToolChanger";
+
+    add_inmemory_preset(bundle.prints, "Customized Process");
+    REQUIRE(bundle.prints.select_preset_by_name("Customized Process", true));
+    CHECK_FALSE(GUI::Agent::has_legacy_preset_bootstrap(bundle, config));
+    REQUIRE(bundle.prints.select_preset_by_name("0.20mm Standard @MyToolChanger", true));
+
+    config.set(AppConfig::SECTION_FILAMENTS, "Customized PLA", "true");
+    CHECK_FALSE(GUI::Agent::has_legacy_preset_bootstrap(bundle, config));
+    config.erase(AppConfig::SECTION_FILAMENTS, "Customized PLA");
+    REQUIRE(GUI::Agent::has_legacy_preset_bootstrap(bundle, config));
 
     const AppConfig::VendorMap bootstrap_vendors {
         {"BBL", {{"Bambu Lab H2S", {"0.4"}}}}
@@ -247,10 +284,15 @@ TEST_CASE("AgentSlicer bootstrap enables Bambu printers and Generic filaments", 
         "Bambu Lab H2S",
         "0.4",
         "Generic PLA @BBL H2S"));
+    bundle.set_num_filaments(1);
+    bundle.set_filament_preset(0, "Generic PLA @BBL H2S");
+    bundle.export_selections(config);
 
     CHECK(bundle.printers.get_selected_preset_name() == "Bambu Lab H2S 0.4 nozzle");
     CHECK(bundle.prints.get_selected_preset_name() == "0.20mm Standard @BBL H2S");
     CHECK(bundle.filament_presets == std::vector<std::string>{"Generic PLA @BBL H2S"});
+    CHECK(config.vendors().count("Custom") == 1);
+    CHECK(config.vendors().count("BBL") == 1);
 
     for (const auto& [model, variants] : vendors.at("BBL")) {
         for (const std::string& variant : variants) {

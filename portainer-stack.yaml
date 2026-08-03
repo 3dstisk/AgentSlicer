@@ -108,12 +108,20 @@ services:
         - "traefik.http.routers.3dstisk_agent_slicer.service=3dstisk_agent_slicer"
         - "traefik.http.services.3dstisk_agent_slicer.loadbalancer.server.port=3000"
 
-        # MCP API and authenticated model uploads.
-        - "traefik.http.routers.3dstisk_agent_slicer_mcp.rule=Host(`agent-slicer.3dstisk.com`) && (PathPrefix(`/mcp`) || PathPrefix(`/uploads`))"
+        # MCP API.
+        - "traefik.http.routers.3dstisk_agent_slicer_mcp.rule=Host(`agent-slicer.3dstisk.com`) && PathPrefix(`/mcp`)"
         - "traefik.http.routers.3dstisk_agent_slicer_mcp.entrypoints=websecure"
         - "traefik.http.routers.3dstisk_agent_slicer_mcp.tls=true"
         - "traefik.http.routers.3dstisk_agent_slicer_mcp.priority=100"
         - "traefik.http.routers.3dstisk_agent_slicer_mcp.service=3dstisk_agent_slicer_mcp"
+
+        # Uploads use the MCP service and its bearer authentication, not desktop Basic auth.
+        - "traefik.http.routers.3dstisk_agent_slicer_uploads.rule=Host(`agent-slicer.3dstisk.com`) && PathPrefix(`/uploads`)"
+        - "traefik.http.routers.3dstisk_agent_slicer_uploads.entrypoints=websecure"
+        - "traefik.http.routers.3dstisk_agent_slicer_uploads.tls=true"
+        - "traefik.http.routers.3dstisk_agent_slicer_uploads.priority=110"
+        - "traefik.http.routers.3dstisk_agent_slicer_uploads.service=3dstisk_agent_slicer_mcp"
+
         - "traefik.http.services.3dstisk_agent_slicer_mcp.loadbalancer.server.port=8765"
 
         - "traefik.swarm.network=nginx-proxy-public"

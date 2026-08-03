@@ -194,7 +194,8 @@ written to a private staging file and published atomically.
 `scene_render` returns structured image metadata plus one `image/png` MCP content
 item per requested view, in request order. It always returns the public
 `top_front` vocabulary (never the native `topfront` spelling). `desktop_capture` returns one
-diagnostic PNG. Image files must be direct children of approved screenshot
+diagnostic PNG. Returned paths are internal identifiers, not HTTP URLs; no
+`/screenshots` route is published. Image files must be direct children of approved screenshot
 roots. The adapter retains the root descriptor, opens the final file with
 no-symlink semantics, validates and reads through that same descriptor, verifies
 PNG structure/CRC/dimensions and requested render dimensions, and enforces the
