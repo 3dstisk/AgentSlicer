@@ -214,6 +214,11 @@ export class DockerWorkerProvisioner implements WorkerProvisioner {
     await this.destroyById(worker.id);
   }
 
+  async healthy(worker: PoolWorker): Promise<boolean> {
+    const check = this.options.checkReady ?? defaultReadyCheck;
+    return check(worker.baseUrl);
+  }
+
   async reconcile(): Promise<number> {
     const filters = encodeURIComponent(JSON.stringify({
       label: [

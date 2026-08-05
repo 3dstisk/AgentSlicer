@@ -8,6 +8,7 @@ export interface PoolWorker {
 
 export interface WorkerProvisioner {
   provision(): Promise<PoolWorker>;
+  healthy(worker: PoolWorker): Promise<boolean>;
   destroy(worker: PoolWorker): Promise<void>;
 }
 
@@ -119,16 +120,54 @@ export class WarmWorkerPool {
     };
   }
 
-  acquire(waitMs: number, signal?: AbortSignal): Promise<WorkerLease> {
+  async acquire(waitMs: number, signal?: AbortSignal): Promise<WorkerLease> {
+    const deadline = Date.now() + Math.max(0, waitMs);
+    while (true) {
+      if (this.closed) {
+        throw new PoolClosedError();
+      }
+      if (signal?.aborted) {
+        throw new PoolUnavailableError("Lease request was abandoned");
+      }
+      const worker = this.ready.shift();
+      if (worker === undefined) {
+        return this.waitForWorker(Math.max(0, deadline - Date.now()), signal);
+      }
+
+      let healthy = false;
+      try {
+        healthy = await this.provisioner.healthy(worker);
+      } catch {
+        // A failed health probe is equivalent to an unhealthy worker.
+      }
+      if (this.closed) {
+        throw new PoolClosedError();
+      }
+      if (signal?.aborted) {
+        if (healthy) {
+          this.offerWorker(worker);
+        } else {
+          await this.retireWorker(worker);
+        }
+        throw new PoolUnavailableError("Lease request was abandoned");
+      }
+      if (healthy) {
+        return this.createLease(worker);
+      }
+
+      await this.retireWorker(worker);
+      if (Date.now() >= deadline) {
+        throw new PoolUnavailableError();
+      }
+    }
+  }
+
+  private waitForWorker(waitMs: number, signal?: AbortSignal): Promise<WorkerLease> {
     if (this.closed) {
       return Promise.reject(new PoolClosedError());
     }
     if (signal?.aborted) {
       return Promise.reject(new PoolUnavailableError("Lease request was abandoned"));
-    }
-    const worker = this.ready.shift();
-    if (worker !== undefined) {
-      return Promise.resolve(this.createLease(worker));
     }
     if (waitMs <= 0) {
       return Promise.reject(new PoolUnavailableError());
@@ -283,6 +322,12 @@ export class WarmWorkerPool {
     void this.ensureCapacity(false);
   }
 
+  private async retireWorker(worker: PoolWorker): Promise<void> {
+    this.workers.delete(worker.id);
+    await Promise.allSettled([this.provisioner.destroy(worker)]);
+    void this.ensureCapacity(false);
+  }
+
   private async ensureCapacity(awaitInitial: boolean): Promise<void> {
     if (this.closed) {
       return;
@@ -317,19 +362,22 @@ export class WarmWorkerPool {
         throw new Error(`Provisioner returned duplicate worker id: ${worker.id}`);
       }
       this.workers.set(worker.id, worker);
-      const waiter = this.waiters.shift();
-      if (waiter === undefined) {
-        this.ready.push(worker);
-      } else {
-        clearTimeout(waiter.timer);
-        waiter.cleanup();
-        waiter.resolve(this.createLease(worker));
-      }
+      this.offerWorker(worker);
     } catch {
       this.scheduleRetry();
     } finally {
       --this.warming;
     }
+  }
+
+  private offerWorker(worker: PoolWorker): void {
+    const waiter = this.waiters.shift();
+    if (waiter === undefined) {
+      this.ready.push(worker);
+      return;
+    }
+    waiter.cleanup();
+    waiter.resolve(this.createLease(worker));
   }
 
   private scheduleRetry(): void {

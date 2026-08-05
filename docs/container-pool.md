@@ -23,6 +23,10 @@ The gateway uses the Docker Engine socket to create and destroy workers on the
 private `agent-slicer-pool` network. Workers have anonymous writable state only:
 no workspace, output, screenshot, or Orca configuration volume is shared. The
 gateway rewrites each proxied request to the worker's private bearer token.
+Immediately before assigning an idle worker, the pool checks that worker's
+`/readyz` endpoint. An unhealthy or unreachable worker is destroyed and the
+request continues waiting for a clean replacement instead of receiving a dead
+MCP endpoint.
 
 Each gateway owns workers through its stable `AGENT_SLICER_POOL_ID`. Before it
 warms the pool at startup, it force-removes containers carrying both its managed

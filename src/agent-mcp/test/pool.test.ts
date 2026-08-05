@@ -17,6 +17,7 @@ class FakeProvisioner implements WorkerProvisioner {
   nextId = 1;
   readonly destroyed: string[] = [];
   readonly provisioned: string[] = [];
+  readonly unhealthy = new Set<string>();
   backendUrl = new URL("http://127.0.0.1:9999");
 
   async provision(): Promise<PoolWorker> {
@@ -31,6 +32,10 @@ class FakeProvisioner implements WorkerProvisioner {
 
   async destroy(worker: PoolWorker): Promise<void> {
     this.destroyed.push(worker.id);
+  }
+
+  async healthy(worker: PoolWorker): Promise<boolean> {
+    return !this.unhealthy.has(worker.id);
   }
 }
 
@@ -144,6 +149,25 @@ describe("warm worker pool", () => {
     expect(pool.leaseForToken(expired.token)).toBeUndefined();
     expect(provisioner.destroyed).toContain("worker-1");
     expect(replacement.worker.id).toBe("worker-2");
+  });
+
+  it("recycles a warm worker that became unhealthy before leasing it", async () => {
+    const provisioner = new FakeProvisioner();
+    const pool = new WarmWorkerPool(provisioner, {
+      size: 1,
+      leaseTtlMs: 60_000,
+      maxQueue: 1,
+      retryDelayMs: 5,
+    });
+    pools.push(pool);
+    await pool.start();
+    provisioner.unhealthy.add("worker-1");
+
+    const lease = await pool.acquire(500);
+
+    expect(lease.worker.id).toBe("worker-2");
+    expect(provisioner.destroyed).toContain("worker-1");
+    expect(pool.stats()).toMatchObject({ ready: 0, leased: 1, warming: 0 });
   });
 });
 
@@ -288,6 +312,7 @@ describe("Docker worker provisioner", () => {
     const worker = await provisioner.provision();
     expect(worker.id).toBe("container-1");
     expect(worker.baseUrl.href).toBe("http://172.30.0.4:8765/");
+    await expect(provisioner.healthy(worker)).resolves.toBe(true);
     const create = calls.find((call) => call.path.startsWith("/containers/create"));
     expect(create?.body).toMatchObject({
       Image: "agent-slicer:test",
