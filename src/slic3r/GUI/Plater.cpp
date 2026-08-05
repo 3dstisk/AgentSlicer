@@ -5746,6 +5746,7 @@ struct Plater::priv
     void clear_agent_process_tracking();
     void set_show_warning_dialog(bool show);
     AgentProcessStatus get_agent_process_status() const;
+    bool cancel_agent_process();
 private:
     bool layers_height_allowed() const;
 
@@ -5822,6 +5823,19 @@ AgentProcessStatus Plater::priv::get_agent_process_status() const
     for (const auto& warning : current_warnings)
         status.warnings.push_back(warning.first.message);
     return status;
+}
+
+bool Plater::priv::cancel_agent_process()
+{
+    const Agent::AgentProcessSnapshot tracked = agent_process.snapshot();
+    if (!tracked.active || tracked.terminal)
+        return false;
+
+    background_process.stop();
+    if (background_process.is_export_scheduled())
+        background_process.reset_export();
+    return agent_process.finish(
+        tracked.generation, Agent::AgentProcessOutcome::Cancelled);
 }
 
 bool PlaterDropTarget::OnDropFiles(wxCoord x, wxCoord y, const wxArrayString &filenames)
@@ -18308,7 +18322,7 @@ bool Plater::export_gcode_for_agent(const boost::filesystem::path& output_path,
     return started;
 }
 
-void Plater::save_project_for_agent(
+bool Plater::save_project_for_agent(
     const boost::filesystem::path& output_path,
     std::weak_ptr<void> lifetime,
     std::function<void(bool, std::string)> completion)
@@ -18333,7 +18347,7 @@ void Plater::save_project_for_agent(
     };
 
     if (lifetime.expired())
-        return;
+        return false;
 
     std::shared_ptr<SavePayload> payload;
     try {
@@ -18379,10 +18393,10 @@ void Plater::save_project_for_agent(
         }
     } catch (const std::exception& error) {
         completion(true, error.what());
-        return;
+        return false;
     } catch (...) {
         completion(true, "Orca project save preparation failed");
-        return;
+        return false;
     }
 
     auto completion_ptr =
@@ -18469,11 +18483,17 @@ void Plater::save_project_for_agent(
 
     if (!queued && !lifetime.expired())
         (*completion_ptr)(true, "Orca project save worker rejected the job");
+    return queued;
 }
 
 AgentProcessStatus Plater::agent_process_status() const
 {
     return p->get_agent_process_status();
+}
+
+bool Plater::cancel_agent_process()
+{
+    return p->cancel_agent_process();
 }
 
 void Plater::set_current_canvas_as_dirty()

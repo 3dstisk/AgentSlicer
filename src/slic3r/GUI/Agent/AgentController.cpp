@@ -318,6 +318,8 @@ nlohmann::json AgentController::handle_prepared(const PreparedRequest& prepared)
             return start_project_save(request.params);
         if (request.method == "job_get")
             return get_job(request.params);
+        if (request.method == "job_cancel")
+            return cancel_job(request.params);
         throw AgentError(ErrorCode::UnknownMethod, "Unknown bridge method",
                          {{"method", request.method}});
     }();
@@ -629,7 +631,7 @@ nlohmann::json AgentController::status() const
                           "object_transform", "object_auto_orient", "scene_arrange", "scene_render",
                           "toolpath_render",
                           "desktop_capture", "preset_control", "settings_control",
-                          "job_registry", "slice", "gcode_export", "project_save"}}
+                          "job_registry", "job_cancel", "slice", "gcode_export", "project_save"}}
     };
 }
 
@@ -1228,6 +1230,42 @@ nlohmann::json AgentController::get_job(const nlohmann::json& params)
     if (it == m_jobs.end())
         throw AgentError(ErrorCode::JobNotFound, "Job does not exist", {{"job_id", id}});
     Job& job = it->second;
+    nlohmann::json result = serialize_job(job);
+    result["revision"] = m_revision;
+    return result;
+}
+
+nlohmann::json AgentController::cancel_job(const nlohmann::json& params)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (!params.contains("job_id") || !params.at("job_id").is_string())
+        throw AgentError(ErrorCode::InvalidRequest, "job_id must be a string");
+    const std::string id = params.at("job_id").get<std::string>();
+    const auto found = m_jobs.find(id);
+    if (found == m_jobs.end())
+        throw AgentError(ErrorCode::JobNotFound, "Job does not exist", {{"job_id", id}});
+
+    Job& job = found->second;
+    if (!is_terminal(job.state)) {
+        if (!job.facade_managed)
+            throw AgentError(ErrorCode::InvalidJobTransition,
+                             "Job is not managed by the native slicer",
+                             {{"job_id", id}, {"state", job_state_name(job.state)}});
+        m_facade->cancel_job(job.type);
+        capture_staging_identity(job);
+        job.result = nullptr;
+        if (job.invalidated) {
+            job.state = JobState::Failed;
+            job.error = job.invalidation_error;
+        } else {
+            job.state = JobState::Cancelled;
+            job.error = nullptr;
+        }
+        if (!job.staging_path.empty())
+            cleanup_staging(job);
+        job.import_snapshot.reset();
+    }
+
     nlohmann::json result = serialize_job(job);
     result["revision"] = m_revision;
     return result;

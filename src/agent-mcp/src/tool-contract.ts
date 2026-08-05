@@ -409,6 +409,7 @@ export const toolSchemas = {
     })
     .strict(),
   job_get: z.object({ job_id: opaqueId }).strict(),
+  job_cancel: z.object({ job_id: opaqueId }).strict(),
   gcode_export: z
     .object({
       ...projectWithRevision,
@@ -491,6 +492,7 @@ export const toolNames = [
   "settings_apply",
   "slice_start",
   "job_get",
+  "job_cancel",
   "gcode_export",
   "project_save",
 ] as const;
@@ -543,6 +545,8 @@ const descriptions: Record<ToolName, string> = {
   slice_start:
     "Start slicing one zero-based plate and return immediately with a running job. A successful job includes print time, filament, cost, change, travel, per-extruder, and per-feature metrics with explicit units.",
   job_get: "Get the current state, progress, result, and error for an asynchronous job.",
+  job_cancel:
+    "Cancel a running asynchronous job. Cancellation is idempotent: terminal jobs are returned unchanged, while accepted cancellation returns the stable cancelled job snapshot.",
   gcode_export:
     "Export a successful slice job to a root-level .gcode filename beneath /outputs. Download the successful result path from the MCP origin with the same bearer token.",
   project_save:
@@ -1674,6 +1678,15 @@ export function registerAgentTools(server: McpServer, dependencies: AgentToolDep
       outputSchema: jobResultSchema,
     },
     (params) => bridgeTool(dependencies, "job_get", params, jobResultSchema),
+  );
+  server.registerTool(
+    "job_cancel",
+    {
+      description: descriptions.job_cancel,
+      inputSchema: toolSchemas.job_cancel,
+      outputSchema: jobResultSchema,
+    },
+    (params) => bridgeTool(dependencies, "job_cancel", params, jobResultSchema),
   );
   server.registerTool(
     "gcode_export",

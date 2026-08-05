@@ -28,6 +28,7 @@ describe("MCP tool schemas", () => {
       "settings_apply",
       "slice_start",
       "job_get",
+      "job_cancel",
       "gcode_export",
       "project_save",
     ]);
@@ -205,9 +206,11 @@ describe("MCP tool schemas", () => {
     ).toBe(false);
   });
 
-  it("has a strict job_get schema and does not expose unsupported render fit", () => {
+  it("has strict job lifecycle schemas and does not expose unsupported render fit", () => {
     expect(toolSchemas.job_get.safeParse({ job_id: "job-1" }).success).toBe(true);
     expect(toolSchemas.job_get.safeParse({ job_id: "job-1", extra: true }).success).toBe(false);
+    expect(toolSchemas.job_cancel.safeParse({ job_id: "job-1" }).success).toBe(true);
+    expect(toolSchemas.job_cancel.safeParse({ job_id: "job-1", extra: true }).success).toBe(false);
     expect(
       toolSchemas.scene_render.safeParse({
         project_id: "project-1",

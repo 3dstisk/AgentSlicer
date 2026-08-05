@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 
 #include <nlohmann/json.hpp>
 
@@ -60,6 +61,7 @@ public:
     virtual FacadeJobState gcode_export_state() const = 0;
     virtual void start_project_save(const std::filesystem::path& path) = 0;
     virtual FacadeJobState project_save_state() const = 0;
+    virtual void cancel_job(std::string_view type) = 0;
 };
 
 std::shared_ptr<AgentSlicerFacade> make_orca_agent_slicer_facade(Plater& plater);

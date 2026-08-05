@@ -1022,7 +1022,7 @@ public:
         if (!m_plater.orient_for_agent(
                 std::move(targets),
                 [this, weak_state](bool failed, std::string error) {
-                    if (const auto state = weak_state.lock()) {
+                    if (const auto state = weak_state.lock(); state && !state->complete) {
                         if (failed) {
                             *state = {true, true, 1.0, nullptr,
                                       {{"message", std::move(error)}}};
@@ -1064,7 +1064,7 @@ public:
         m_arrange_state = std::make_shared<FacadeJobState>();
         std::weak_ptr<FacadeJobState> weak_state = m_arrange_state;
         if (!m_plater.arrange_for_agent([weak_state](bool failed, std::string error) {
-                if (const auto state = weak_state.lock()) {
+                if (const auto state = weak_state.lock(); state && !state->complete) {
                     if (failed)
                         *state = {true, true, 1.0, nullptr,
                                   {{"message", std::move(error)}}};
@@ -1847,17 +1847,29 @@ public:
     void start_project_save(const std::filesystem::path& path) override
     {
         assert_gui_thread();
+        if (!m_plater.get_ui_job_worker().is_idle())
+            throw AgentError(ErrorCode::MutationInProgress,
+                             "Orca cannot queue the project save job");
         m_save_active = true;
+        m_save_worker_owned = false;
         m_save_state = std::make_shared<FacadeJobState>();
         std::weak_ptr<FacadeJobState> weak_state = m_save_state;
         const std::weak_ptr<void> lifetime = m_lifetime;
         m_plater.CallAfter([this, path, lifetime, weak_state] {
             if (lifetime.expired())
                 return;
-            m_plater.save_project_for_agent(
+            const auto state = weak_state.lock();
+            if (!state || state->complete)
+                return;
+            if (!m_plater.get_ui_job_worker().is_idle()) {
+                *state = {true, true, 1.0, nullptr,
+                          {{"message", "Orca project save worker became busy"}}};
+                return;
+            }
+            m_save_worker_owned = m_plater.save_project_for_agent(
                 boost::filesystem::path(path.string()), lifetime,
                 [weak_state](bool failed, std::string error) {
-                    if (const auto state = weak_state.lock()) {
+                    if (const auto state = weak_state.lock(); state && !state->complete) {
                         if (failed)
                             *state = {true, true, 1.0, nullptr,
                                       {{"message", std::move(error)}}};
@@ -1876,7 +1888,64 @@ public:
         if (!m_save_state || !m_save_state->complete)
             return {false, false, 0.5, nullptr, nullptr};
         m_save_active = false;
+        m_save_worker_owned = false;
         return *m_save_state;
+    }
+
+    void cancel_job(std::string_view type) override
+    {
+        assert_gui_thread();
+        const auto cancel_ui_job = [this](
+            bool active, const std::shared_ptr<FacadeJobState>& state,
+            const char* message) {
+            if (!active || !state || state->complete)
+                throw AgentError(ErrorCode::InvalidJobTransition, message);
+            const double progress = state->progress;
+            *state = {true, false, progress, nullptr, nullptr, true};
+            m_plater.get_ui_job_worker().cancel_all();
+        };
+
+        if (type == "model_import") {
+            if (!m_import_active || !model_import_state(false).cancelled)
+                throw AgentError(ErrorCode::InvalidJobTransition,
+                                 "Model import is no longer cancellable");
+            return;
+        }
+        if (type == "auto_orient") {
+            cancel_ui_job(m_auto_orient_active, m_auto_orient_state,
+                          "Auto-orient is no longer cancellable");
+            return;
+        }
+        if (type == "arrange") {
+            cancel_ui_job(m_arrange_active, m_arrange_state,
+                          "Arrange is no longer cancellable");
+            return;
+        }
+        if (type == "slice") {
+            if (!m_slice_active || !m_plater.cancel_agent_process())
+                throw AgentError(ErrorCode::InvalidJobTransition,
+                                 "Slice is no longer cancellable");
+            return;
+        }
+        if (type == "gcode_export") {
+            if (!m_export_active || !m_plater.cancel_agent_process())
+                throw AgentError(ErrorCode::InvalidJobTransition,
+                                 "G-code export is no longer cancellable");
+            return;
+        }
+        if (type == "project_save") {
+            if (!m_save_active || !m_save_state || m_save_state->complete)
+                throw AgentError(ErrorCode::InvalidJobTransition,
+                                 "Project save is no longer cancellable");
+            const double progress = m_save_state->progress;
+            *m_save_state = {true, false, progress, nullptr, nullptr, true};
+            if (m_save_worker_owned)
+                m_plater.get_ui_job_worker().cancel_all();
+            m_save_worker_owned = false;
+            return;
+        }
+        throw AgentError(ErrorCode::InvalidJobTransition,
+                         "Job type is not cancellable", {{"type", type}});
     }
 
 private:
@@ -2079,6 +2148,7 @@ private:
     mutable bool m_export_active {false};
     mutable std::filesystem::path m_export_path;
     mutable bool m_save_active {false};
+    mutable bool m_save_worker_owned {false};
     std::shared_ptr<void> m_lifetime {std::make_shared<int>(0)};
     mutable std::shared_ptr<FacadeJobState> m_save_state;
 };

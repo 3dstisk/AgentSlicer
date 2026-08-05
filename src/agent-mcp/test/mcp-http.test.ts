@@ -181,6 +181,39 @@ async function startMcp(options: {
             revision: 2,
           };
         }
+        if (method === "job_cancel") {
+          return {
+            job_id: "job-1",
+            type: "arrange",
+            state: "cancelled",
+            progress: 0.5,
+            project_id: "project-1",
+            source_revision: 2,
+            warnings: [],
+            metadata: {
+              config_snapshot: {
+                schema_version: 2,
+                revision: 2,
+                presets: {
+                  printer: "CoreXY",
+                  process: "0.20mm Quality",
+                  filaments: ["Generic PLA"],
+                },
+                settings: {
+                  layer_height: "0.2",
+                  wall_loops: "2",
+                },
+                overrides: [],
+                redacted_keys: ["global/post_process", "global/printhost_password"],
+                sha256: "a".repeat(64),
+                bytes: 2048,
+              },
+            },
+            result: null,
+            error: null,
+            revision: 2,
+          };
+        }
         if (method === "model_import") {
           return { job_id: "import-1", state: "running" };
         }
@@ -1136,6 +1169,21 @@ describe("Streamable HTTP MCP server", () => {
       progress: 0.5,
     });
     expect(calls).toContainEqual(["job_get", { job_id: "job-1" }]);
+  });
+
+  it("registers job_cancel and returns the terminal job snapshot", async () => {
+    const { client, calls } = await startMcp();
+    const job = await client.callTool({
+      name: "job_cancel",
+      arguments: { job_id: "job-1" },
+    });
+    expect(job.structuredContent).toMatchObject({
+      job_id: "job-1",
+      state: "cancelled",
+      result: null,
+      error: null,
+    });
+    expect(calls).toContainEqual(["job_cancel", { job_id: "job-1" }]);
   });
 
   it("starts model import as a job", async () => {

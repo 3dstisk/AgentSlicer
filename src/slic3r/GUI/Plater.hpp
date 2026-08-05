@@ -649,10 +649,11 @@ public:
     bool slice_for_agent(std::optional<std::size_t> plate_index);
     bool export_gcode_for_agent(const boost::filesystem::path& output_path,
                                 std::size_t plate_index);
-    void save_project_for_agent(const boost::filesystem::path& output_path,
+    bool save_project_for_agent(const boost::filesystem::path& output_path,
                                 std::weak_ptr<void> lifetime,
                                 std::function<void(bool, std::string)> completion);
     AgentProcessStatus agent_process_status() const;
+    bool cancel_agent_process();
     void orient();
     void find_new_position(const ModelInstancePtrs  &instances);
     //BBS: add job state related functions

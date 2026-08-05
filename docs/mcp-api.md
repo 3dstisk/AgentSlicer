@@ -52,6 +52,7 @@ The v1 tool list and order are fixed:
 | `settings_apply` | Atomically validate/apply typed changes; `dry_run: true` validates without mutation. |
 | `slice_start` | Start slicing one zero-based plate and return a job. |
 | `job_get` | Poll job state, progress, warnings, result, error, and revision. |
+| `job_cancel` | Cancel a running job, or return an already-terminal job unchanged. |
 | `gcode_export` | Publish a successful slice as one root-level `.gcode` file under `/outputs`. |
 | `project_save` | Publish the active project as one root-level `.3mf` file under `/outputs`. |
 
@@ -140,6 +141,13 @@ failure. Otherwise poll every started job until `succeeded`, `failed`, or
 - `project_id` and immutable `source_revision`
 - `state`, monotonic `progress` from 0 to 1, and current project `revision`
 - `warnings[]`, nullable `error`, nullable `result`, and type-specific `metadata`
+
+Call `job_cancel` with `{job_id}` to cancel any running native import,
+auto-orient, arrange, slice, G-code export, or project-save job. A successful
+cancellation returns the same stable job snapshot shape as `job_get`, with
+`state:"cancelled"`, a null result, and a null error. Cancellation is idempotent:
+calling it for a terminal job returns that job unchanged, so a completion that
+was already observed is never rewritten as cancelled.
 
 `model_import` always exposes `metadata: {}` (including immediate startup
 failure); native bridge implementations must not serialize that field as `null`.
@@ -320,6 +328,7 @@ Example mutation and poll:
 ```json
 {"name":"scene_arrange","arguments":{"project_id":"project_…","expected_revision":2}}
 {"name":"job_get","arguments":{"job_id":"job_…"}}
+{"name":"job_cancel","arguments":{"job_id":"job_…"}}
 ```
 
 After arrangement succeeds, use the job's new `revision` (or refresh with

@@ -115,6 +115,7 @@ private:
     nlohmann::json start_gcode_export(const nlohmann::json& params);
     nlohmann::json start_project_save(const nlohmann::json& params);
     nlohmann::json get_job(const nlohmann::json& params);
+    nlohmann::json cancel_job(const nlohmann::json& params);
     void require_active_project(const nlohmann::json& params) const;
     std::filesystem::path resolve_output_file(const nlohmann::json& params,
                                               std::string_view extension) const;

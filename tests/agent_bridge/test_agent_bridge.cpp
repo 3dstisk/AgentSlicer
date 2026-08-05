@@ -247,6 +247,13 @@ public:
         state.metadata = job_metadata();
         return state;
     }
+    void cancel_job(std::string_view type) override
+    {
+        cancelled_job_types.emplace_back(type);
+        if (fail_cancel)
+            throw AgentError(ErrorCode::InvalidJobTransition,
+                             "native job is no longer cancellable");
+    }
 
     int create_calls {0};
     std::function<void()> on_create;
@@ -303,6 +310,8 @@ public:
     FacadeJobState next_export_state;
     mutable std::function<void()> on_export_state;
     FacadeJobState next_save_state;
+    std::vector<std::string> cancelled_job_types;
+    bool fail_cancel {false};
     std::string fingerprint {"native-1"};
     std::string config_fingerprint {"config-1"};
     nlohmann::json custom_job_metadata;
@@ -1535,6 +1544,83 @@ TEST_CASE("Job registry exposes deterministic states and bounded progress", "[Ag
     REQUIRE_THROWS_AS(controller.create_job("slice"), AgentError);
     REQUIRE(controller.update_job(arrange_job, JobState::Cancelled, 0.0));
     REQUIRE_NOTHROW(controller.create_job("slice"));
+}
+
+TEST_CASE("Job cancellation is native, terminal, and idempotent", "[AgentBridge]")
+{
+    auto facade = std::make_shared<FakeFacade>();
+    AgentController controller(facade);
+    const auto project = controller.handle({"create", "project_create", {}});
+    facade->next_arrange_state = {false, false, 0.4, nullptr, nullptr};
+    const auto started = controller.handle(
+        {"arrange", "scene_arrange",
+         {{"project_id", project["project_id"]},
+          {"expected_revision", project["revision"]}}});
+
+    const auto cancelled = controller.handle(
+        {"cancel", "job_cancel", {{"job_id", started["job_id"]}}});
+    REQUIRE(cancelled["state"] == "cancelled");
+    REQUIRE(cancelled["progress"] == 0.4);
+    REQUIRE(cancelled["result"].is_null());
+    REQUIRE(cancelled["error"].is_null());
+    REQUIRE(cancelled["revision"] == project["revision"]);
+    REQUIRE(facade->cancelled_job_types == std::vector<std::string> {"arrange"});
+
+    const auto repeated = controller.handle(
+        {"cancel-again", "job_cancel", {{"job_id", started["job_id"]}}});
+    REQUIRE(repeated == cancelled);
+    REQUIRE(facade->cancelled_job_types == std::vector<std::string> {"arrange"});
+}
+
+TEST_CASE("Job cancellation preserves completed jobs and rejects unknown jobs", "[AgentBridge]")
+{
+    auto facade = std::make_shared<FakeFacade>();
+    AgentController controller(facade);
+    const std::string completed_id = controller.create_job("slice");
+    REQUIRE(controller.update_job(completed_id, JobState::Running, 0.5));
+    REQUIRE(controller.update_job(
+        completed_id, JobState::Succeeded, 1.0, {{"sliced", true}}));
+
+    const auto completed = controller.handle(
+        {"cancel-complete", "job_cancel", {{"job_id", completed_id}}});
+    REQUIRE(completed["state"] == "succeeded");
+    REQUIRE(completed["result"]["sliced"] == true);
+    REQUIRE(facade->cancelled_job_types.empty());
+
+    try {
+        controller.handle(
+            {"cancel-missing", "job_cancel", {{"job_id", "job_missing"}}});
+        FAIL("Expected a missing job error");
+    } catch (const AgentError& error) {
+        REQUIRE(error.code() == ErrorCode::JobNotFound);
+    }
+}
+
+TEST_CASE("Cancelling artifact jobs removes their trusted staging output", "[AgentBridge]")
+{
+    TestWorkspace workspace;
+    std::filesystem::create_directories(workspace.root / "outputs");
+    auto facade = std::make_shared<FakeFacade>();
+    facade->next_save_state = {false, false, 0.5, nullptr, nullptr};
+    AgentController controller(
+        facade, workspace.root, workspace.root / "shots", 1024,
+        workspace.root / "outputs", workspace.root / "imports",
+        workspace.root / "artifacts");
+    const auto project = controller.handle({"create", "project_create", {}});
+    const auto started = controller.handle(
+        {"save", "project_save",
+         {{"project_id", project["project_id"]},
+          {"expected_revision", project["revision"]},
+          {"output_path", "cancelled.3mf"}}});
+    REQUIRE(std::filesystem::is_regular_file(facade->save_path));
+
+    const auto cancelled = controller.handle(
+        {"cancel", "job_cancel", {{"job_id", started["job_id"]}}});
+    REQUIRE(cancelled["state"] == "cancelled");
+    REQUIRE_FALSE(std::filesystem::exists(facade->save_path));
+    REQUIRE_FALSE(std::filesystem::exists(workspace.root / "outputs" / "cancelled.3mf"));
+    REQUIRE(facade->cancelled_job_types ==
+            std::vector<std::string> {"project_save"});
 }
 
 TEST_CASE("Project replacement honors the mutation lease and preserves job history", "[AgentBridge]")
