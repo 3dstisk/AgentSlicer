@@ -531,6 +531,7 @@ try {
     "settings_apply",
     "slice_start",
     "job_get",
+    "job_cancel",
     "gcode_export",
     "project_save",
   ];
