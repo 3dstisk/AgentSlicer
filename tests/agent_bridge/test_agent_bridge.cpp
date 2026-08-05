@@ -331,6 +331,30 @@ nlohmann::json metadata_near_snapshot_limit()
     return metadata;
 }
 
+nlohmann::json print_metrics_fixture()
+{
+    return {
+        {"time", {{"normal_seconds", 3725.5}, {"silent_seconds", nullptr},
+                  {"preparation_seconds", 18.25}}},
+        {"filament", {
+            {"used_length_mm", 12345.6}, {"extruded_volume_mm3", 29700.2},
+            {"weight_g", 36.8}, {"total_cost", 1.42},
+            {"wipe_tower_used_length_mm", 320.5}, {"wipe_tower_cost", 0.08},
+            {"per_extruder", {{{"extruder_id", 0}, {"model_volume_mm3", 28000.0},
+                                {"support_volume_mm3", 500.0},
+                                {"wipe_tower_volume_mm3", 700.0},
+                                {"flushed_volume_mm3", 500.2},
+                                {"total_volume_mm3", 29700.2}}}},
+            {"per_feature", {{{"feature", "outer_wall"},
+                               {"used_length_mm", 2345.6}, {"weight_g", 7.1}}}}
+        }},
+        {"changes", {{"tool_changes", 2}, {"filament_changes", 3},
+                     {"extruder_changes", 2}}},
+        {"travel", {{"distance_mm", 40000.0}, {"move_count", 900}}},
+        {"initial_tool", 0}
+    };
+}
+
 } // namespace
 
 TEST_CASE("Structured settings validate every numeric component against bounds", "[AgentBridge]")
@@ -1760,7 +1784,8 @@ TEST_CASE("Slice and export jobs preserve revision and publish staged artifacts"
                                workspace.root / "imports", workspace.root / "artifacts");
     const auto project = controller.handle({"create", "project_create", {}});
     facade->next_slice_state =
-        {true, false, 1.0, {{"sliced", true}}, nullptr, false,
+        {true, false, 1.0,
+         {{"sliced", true}, {"print_metrics", print_metrics_fixture()}}, nullptr, false,
          nlohmann::json::array({{{"code", "thin_wall"}, {"message", "Thin wall"},
                                  {"details", nullptr}}})};
     const auto slice = controller.handle(
@@ -1775,6 +1800,11 @@ TEST_CASE("Slice and export jobs preserve revision and publish staged artifacts"
     REQUIRE(sliced["warnings"][0]["code"] == "thin_wall");
     REQUIRE(sliced["metadata"]["config_snapshot"]["revision"] == project["revision"]);
     REQUIRE(sliced["metadata"]["config_snapshot"]["settings"]["layer_height"] == "0.2");
+    REQUIRE(sliced["result"]["plate_index"] == 1);
+    REQUIRE(sliced["result"]["print_metrics"] == print_metrics_fixture());
+    REQUIRE(sliced["result"]["print_metrics"]["time"]["normal_seconds"] == 3725.5);
+    REQUIRE(sliced["result"]["print_metrics"]["filament"]["per_feature"][0]["feature"] ==
+            "outer_wall");
 
     facade->next_export_state =
         {true, false, 1.0, {{"exported", true}}, nullptr, false, nlohmann::json::array()};

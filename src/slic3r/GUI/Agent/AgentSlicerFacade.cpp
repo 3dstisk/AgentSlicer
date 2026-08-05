@@ -11,6 +11,7 @@
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/GCode/Thumbnails.hpp"
 #include "libslic3r/miniz_extension.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -20,6 +21,7 @@
 #include <array>
 #include <atomic>
 #include <cfloat>
+#include <cmath>
 #include <cstdint>
 #include <exception>
 #include <fstream>
@@ -786,6 +788,8 @@ public:
         m_auto_orient_active = false;
         m_auto_orient_state.reset();
         m_auto_orient_owned_fingerprint.clear();
+        m_slice_active = false;
+        m_slice_plate_index.reset();
     }
 
     void start_model_import(const std::filesystem::path& path) override
@@ -1615,10 +1619,18 @@ public:
         assert_gui_thread();
         require_no_post_process();
         m_slice_active = true;
+        m_slice_plate_index.reset();
         if (!m_plater.slice_for_agent(plate_index)) {
             m_slice_active = false;
             throw AgentError(ErrorCode::InvalidRequest, "Orca could not start slicing");
         }
+        const int selected_plate = m_plater.get_partplate_list().get_curr_plate_index();
+        if (selected_plate < 0) {
+            m_slice_active = false;
+            throw AgentError(ErrorCode::InternalError,
+                             "Orca did not retain the sliced plate selection");
+        }
+        m_slice_plate_index = static_cast<std::size_t>(selected_plate);
     }
 
     FacadeJobState slice_state() const override
@@ -1638,8 +1650,21 @@ public:
             return {true, true, 1.0, nullptr,
                     {{"message", status.error.empty() ? "Orca slicing failed" : status.error}},
                     false, warnings(status)};
-        if (status.succeeded)
-            return {true, false, 1.0, {{"sliced", true}}, nullptr, false, warnings(status)};
+        if (status.succeeded) {
+            try {
+                if (!m_slice_plate_index)
+                    throw std::runtime_error("Slice plate identity was lost");
+                return {true, false, 1.0,
+                        {{"sliced", true},
+                         {"print_metrics", slice_print_metrics(*m_slice_plate_index)}},
+                        nullptr, false, warnings(status)};
+            } catch (const std::exception& error) {
+                return {true, true, 1.0, nullptr,
+                        {{"message", std::string("Unable to collect print metrics: ") +
+                                         error.what()}},
+                        false, warnings(status)};
+            }
+        }
         return {true, true, 1.0, nullptr,
                 {{"message", "Orca slicing stopped without producing a valid result"}},
                 false, warnings(status)};
@@ -1760,6 +1785,152 @@ private:
         return result;
     }
 
+    static double metric_value(double value, const char* name)
+    {
+        if (!std::isfinite(value) || value < 0.0)
+            throw std::runtime_error(std::string("Invalid print metric: ") + name);
+        return value;
+    }
+
+    static const char* feature_key(ExtrusionRole role)
+    {
+        switch (role) {
+        case erNone:                     return "undefined";
+        case erPerimeter:                return "inner_wall";
+        case erExternalPerimeter:        return "outer_wall";
+        case erOverhangPerimeter:        return "overhang_wall";
+        case erInternalInfill:           return "sparse_infill";
+        case erSolidInfill:              return "internal_solid_infill";
+        case erTopSolidInfill:           return "top_surface";
+        case erBottomSurface:            return "bottom_surface";
+        case erIroning:                  return "ironing";
+        case erBridgeInfill:             return "bridge";
+        case erInternalBridgeInfill:     return "internal_bridge";
+        case erGapFill:                  return "gap_infill";
+        case erSkirt:                    return "skirt";
+        case erBrim:                     return "brim";
+        case erSupportMaterial:          return "support";
+        case erSupportMaterialInterface: return "support_interface";
+        case erSupportTransition:        return "support_transition";
+        case erWipeTower:                return "prime_tower";
+        case erCustom:                   return "custom";
+        case erMixed:                    return "multiple";
+        default:                         return "unknown";
+        }
+    }
+
+    nlohmann::json slice_print_metrics(std::size_t plate_index) const
+    {
+        PartPlateList& plates = m_plater.get_partplate_list();
+        if (plate_index >= static_cast<std::size_t>(plates.get_plate_count()))
+            throw std::runtime_error("Sliced plate no longer exists");
+        PartPlate* plate = plates.get_plate(static_cast<int>(plate_index));
+        if (plate == nullptr || plate->fff_print() == nullptr ||
+            plate->get_slice_result() == nullptr || !plate->is_slice_result_valid())
+            throw std::runtime_error("Sliced plate has no valid statistics");
+
+        GCodeProcessorResult* result = plate->get_slice_result();
+        result->lock();
+        struct ResultUnlock {
+            GCodeProcessorResult* result;
+            ~ResultUnlock() { result->unlock(); }
+        } unlock {result};
+
+        const PrintStatistics& totals = plate->fff_print()->print_statistics();
+        const PrintEstimatedStatistics& estimated = result->print_statistics;
+        const auto& normal = estimated.modes[
+            static_cast<std::size_t>(PrintEstimatedStatistics::ETimeMode::Normal)];
+        const auto& silent = estimated.modes[
+            static_cast<std::size_t>(PrintEstimatedStatistics::ETimeMode::Stealth)];
+
+        nlohmann::json silent_seconds = nullptr;
+        if (silent.time > 0.0f)
+            silent_seconds = metric_value(silent.time, "silent_time_seconds");
+
+        std::set<std::size_t> extruder_ids;
+        const auto collect_ids = [&extruder_ids](const auto& values) {
+            for (const auto& [id, value] : values) {
+                (void) value;
+                extruder_ids.insert(id);
+            }
+        };
+        collect_ids(estimated.model_volumes_per_extruder);
+        collect_ids(estimated.support_volumes_per_extruder);
+        collect_ids(estimated.wipe_tower_volumes_per_extruder);
+        collect_ids(estimated.flush_per_filament);
+        collect_ids(estimated.total_volumes_per_extruder);
+
+        const auto volume_for = [](const auto& values, std::size_t id) {
+            const auto found = values.find(id);
+            return found == values.end() ? 0.0 : found->second;
+        };
+        nlohmann::json per_extruder = nlohmann::json::array();
+        for (const std::size_t id : extruder_ids) {
+            per_extruder.push_back({
+                {"extruder_id", id},
+                {"model_volume_mm3", metric_value(
+                    volume_for(estimated.model_volumes_per_extruder, id),
+                    "model_volume_mm3")},
+                {"support_volume_mm3", metric_value(
+                    volume_for(estimated.support_volumes_per_extruder, id),
+                    "support_volume_mm3")},
+                {"wipe_tower_volume_mm3", metric_value(
+                    volume_for(estimated.wipe_tower_volumes_per_extruder, id),
+                    "wipe_tower_volume_mm3")},
+                {"flushed_volume_mm3", metric_value(
+                    volume_for(estimated.flush_per_filament, id),
+                    "flushed_volume_mm3")},
+                {"total_volume_mm3", metric_value(
+                    volume_for(estimated.total_volumes_per_extruder, id),
+                    "total_volume_mm3")}
+            });
+        }
+
+        nlohmann::json per_feature = nlohmann::json::array();
+        for (const auto& [role, usage] : estimated.used_filaments_per_role) {
+            per_feature.push_back({
+                {"feature", feature_key(role)},
+                {"used_length_mm", metric_value(
+                    usage.first * 1000.0, "feature_used_length_mm")},
+                {"weight_g", metric_value(usage.second, "feature_weight_g")}
+            });
+        }
+
+        return {
+            {"time", {
+                {"normal_seconds", metric_value(normal.time, "normal_time_seconds")},
+                {"silent_seconds", std::move(silent_seconds)},
+                {"preparation_seconds", metric_value(
+                    normal.prepare_time, "preparation_time_seconds")}
+            }},
+            {"filament", {
+                {"used_length_mm", metric_value(
+                    totals.total_used_filament, "used_filament_mm")},
+                {"extruded_volume_mm3", metric_value(
+                    totals.total_extruded_volume, "extruded_volume_mm3")},
+                {"weight_g", metric_value(totals.total_weight, "filament_weight_g")},
+                {"total_cost", metric_value(totals.total_cost, "total_cost")},
+                {"wipe_tower_used_length_mm", metric_value(
+                    totals.total_wipe_tower_filament, "wipe_tower_used_length_mm")},
+                {"wipe_tower_cost", metric_value(
+                    totals.total_wipe_tower_cost, "wipe_tower_cost")},
+                {"per_extruder", std::move(per_extruder)},
+                {"per_feature", std::move(per_feature)}
+            }},
+            {"changes", {
+                {"tool_changes", totals.total_toolchanges},
+                {"filament_changes", estimated.total_filament_changes},
+                {"extruder_changes", estimated.total_extruder_changes}
+            }},
+            {"travel", {
+                {"distance_mm", metric_value(
+                    estimated.total_travel_distance, "travel_distance_mm")},
+                {"move_count", estimated.total_travel_moves}
+            }},
+            {"initial_tool", totals.initial_tool}
+        };
+    }
+
     Plater& m_plater;
     mutable bool m_import_active {false};
     mutable std::shared_ptr<ImportTask> m_import_task;
@@ -1771,6 +1942,7 @@ private:
     mutable std::shared_ptr<FacadeJobState> m_arrange_state;
     std::string m_arrange_owned_fingerprint;
     mutable bool m_slice_active {false};
+    mutable std::optional<std::size_t> m_slice_plate_index;
     mutable bool m_export_active {false};
     mutable std::filesystem::path m_export_path;
     mutable bool m_save_active {false};

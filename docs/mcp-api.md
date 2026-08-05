@@ -154,15 +154,33 @@ the final controller-produced snapshot envelope (including its revision and
 presets) are each bounded to 512 KiB; override arrays are bounded to 4096
 entries, and each serialized value is limited to 64 KiB.
 Settings and `redacted_keys` have no independent count cap: their total bytes
-remain bounded by the snapshot limits. Unsafe values participate only in in-memory hashes. Auto-orient succeeds with
-`{oriented:true}`, places its targets on the bed, and advances the project revision.
-Arrange succeeds with `{arranged:true}` and advances the project revision. Model import has empty
+remain bounded by the snapshot limits. Unsafe values participate only in
+in-memory hashes. Auto-orient succeeds with `{oriented:true}`, places its
+targets on the bed, and advances the project revision. Arrange succeeds with
+`{arranged:true}` and advances the project revision. Model import has empty
 metadata and succeeds with `{project_id,revision,object_ids}` while advancing
-the project revision. Slice metadata adds its
-plate to the same snapshot. G-code export inherits the exact snapshot from its
-source slice; project saves capture the current configuration. Exports and saves
-publish only after their trusted staged file is complete. A failed job carries
-the same stable error object shape as a synchronous tool error.
+the project revision. Slice metadata adds its plate to the same snapshot.
+G-code export inherits the exact snapshot from its source slice; project saves
+capture the current configuration. Exports and saves publish only after their
+trusted staged file is complete. A failed job carries the same stable error
+object shape as a synchronous tool error.
+
+A successful slice returns `{plate_index,sliced:true,print_metrics}`. Metric
+field names include their physical units; cost values use Orca's configured
+filament/time cost units:
+
+- `time`: normal, optional silent-mode, and preparation time in seconds
+- `filament`: total length in millimetres, volume in mm³, weight in grams,
+  estimated cost, wipe-tower totals, and per-extruder volume breakdowns
+- `filament.per_feature`: stable feature keys with used length in millimetres
+  and weight in grams
+- `changes`: tool, filament, and extruder change counts
+- `travel`: distance in millimetres and move count
+- `initial_tool`: Orca's zero-based initial tool index
+
+The native bridge reads these values only after the selected plate has a valid
+completed G-code result. Invalid or non-finite native statistics fail the slice
+job instead of returning an incomplete metrics object.
 
 `project_save` completes and bounds configuration preparation before native
 serialization starts. A preparation failure returns a registered failed job

@@ -471,9 +471,12 @@ void AgentController::refresh_jobs()
                 job.state = JobState::Succeeded;
             if (job.state == JobState::Succeeded)
                 job.error = nullptr;
-            if (job.type == "slice")
-                job.result = {{"plate_index", job.metadata.at("plate_index")},
-                              {"sliced", true}};
+            if (job.type == "slice") {
+                if (!job.result.is_object())
+                    job.result = nlohmann::json::object();
+                job.result["plate_index"] = job.metadata.at("plate_index");
+                job.result["sliced"] = true;
+            }
         }
         if (is_terminal(job.state) && !job.staging_path.empty() &&
             job.state != JobState::Succeeded)

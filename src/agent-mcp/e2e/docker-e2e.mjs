@@ -366,6 +366,26 @@ function validConfigSnapshot(snapshot, revision, selectedPresets) {
     snapshot.bytes <= 524_288;
 }
 
+function validPrintMetrics(metrics) {
+  const nonnegative = (value) => Number.isFinite(value) && value >= 0;
+  return nonnegative(metrics?.time?.normal_seconds) &&
+    metrics.time.normal_seconds > 0 &&
+    (metrics.time.silent_seconds === null || nonnegative(metrics.time.silent_seconds)) &&
+    nonnegative(metrics.time.preparation_seconds) &&
+    nonnegative(metrics?.filament?.used_length_mm) &&
+    nonnegative(metrics.filament.extruded_volume_mm3) &&
+    nonnegative(metrics.filament.weight_g) &&
+    nonnegative(metrics.filament.total_cost) &&
+    Array.isArray(metrics.filament.per_extruder) &&
+    Array.isArray(metrics.filament.per_feature) &&
+    Number.isSafeInteger(metrics?.changes?.tool_changes) &&
+    Number.isSafeInteger(metrics?.changes?.filament_changes) &&
+    Number.isSafeInteger(metrics?.changes?.extruder_changes) &&
+    nonnegative(metrics?.travel?.distance_mm) &&
+    Number.isSafeInteger(metrics?.travel?.move_count) &&
+    Number.isSafeInteger(metrics?.initial_tool);
+}
+
 function changedScalar(descriptor, current) {
   if (Array.isArray(descriptor.enum_values)) {
     const alternate = descriptor.enum_values.find((value) => !equalJson(value, current));
@@ -1049,11 +1069,15 @@ try {
   if (
     sliceJob.result?.sliced !== true ||
     sliceJob.result?.plate_index !== plateIndex ||
+    !validPrintMetrics(sliceJob.result?.print_metrics) ||
     sliceJob.metadata?.plate_index !== plateIndex
   ) {
     throw new Error(`Invalid completed slice result: ${JSON.stringify(sliceJob)}`);
   }
-  record("slice completed", { job_id: sliceJob.job_id });
+  record("slice completed with print metrics", {
+    job_id: sliceJob.job_id,
+    print_metrics: sliceJob.result.print_metrics,
+  });
 
   await expectValidationFailure(
     client,

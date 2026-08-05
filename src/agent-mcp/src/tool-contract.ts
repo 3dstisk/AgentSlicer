@@ -512,7 +512,8 @@ const descriptions: Record<ToolName, string> = {
     "Read typed effective values for exact setting keys and scopes. Use filament_index for a selected extruder slot. Float-or-percent values are {value, percent}; points and point groups are nested numeric arrays.",
   settings_apply:
     "Validate and atomically apply typed JSON setting changes in printer, process, or filament scope (using filament_index for an extruder slot). Float-or-percent values are {value, percent}; points and point groups are nested numeric arrays. dry_run validates the entire batch without mutation.",
-  slice_start: "Start slicing one zero-based plate and return immediately with a running job.",
+  slice_start:
+    "Start slicing one zero-based plate and return immediately with a running job. A successful job includes print time, filament, cost, change, travel, per-extruder, and per-feature metrics with explicit units.",
   job_get: "Get the current state, progress, result, and error for an asynchronous job.",
   gcode_export:
     "Export a successful slice job to a root-level .gcode filename beneath /outputs. Download the successful result path from the MCP origin with the same bearer token.",
@@ -891,6 +892,66 @@ const modelImportJobSchema = z
     result: importResultSchema.nullable(),
   })
   .strict();
+const printMetricsSchema = z
+  .object({
+    time: z
+      .object({
+        normal_seconds: z.number().nonnegative(),
+        silent_seconds: z.number().nonnegative().nullable(),
+        preparation_seconds: z.number().nonnegative(),
+      })
+      .strict(),
+    filament: z
+      .object({
+        used_length_mm: z.number().nonnegative(),
+        extruded_volume_mm3: z.number().nonnegative(),
+        weight_g: z.number().nonnegative(),
+        total_cost: z.number().nonnegative(),
+        wipe_tower_used_length_mm: z.number().nonnegative(),
+        wipe_tower_cost: z.number().nonnegative(),
+        per_extruder: z
+          .array(
+            z
+              .object({
+                extruder_id: unsignedSafeInteger,
+                model_volume_mm3: z.number().nonnegative(),
+                support_volume_mm3: z.number().nonnegative(),
+                wipe_tower_volume_mm3: z.number().nonnegative(),
+                flushed_volume_mm3: z.number().nonnegative(),
+                total_volume_mm3: z.number().nonnegative(),
+              })
+              .strict(),
+          )
+          .max(64),
+        per_feature: z
+          .array(
+            z
+              .object({
+                feature: z.string().min(1).max(64),
+                used_length_mm: z.number().nonnegative(),
+                weight_g: z.number().nonnegative(),
+              })
+              .strict(),
+          )
+          .max(64),
+      })
+      .strict(),
+    changes: z
+      .object({
+        tool_changes: unsignedSafeInteger,
+        filament_changes: unsignedSafeInteger,
+        extruder_changes: unsignedSafeInteger,
+      })
+      .strict(),
+    travel: z
+      .object({
+        distance_mm: z.number().nonnegative(),
+        move_count: unsignedSafeInteger,
+      })
+      .strict(),
+    initial_tool: unsignedSafeInteger,
+  })
+  .strict();
 const sliceJobSchema = z
   .object({
     ...jobBase,
@@ -905,6 +966,7 @@ const sliceJobSchema = z
       .object({
         plate_index: unsignedSafeInteger,
         sliced: z.literal(true),
+        print_metrics: printMetricsSchema,
       })
       .strict()
       .nullable(),

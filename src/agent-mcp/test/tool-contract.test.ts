@@ -578,6 +578,51 @@ describe("MCP tool schemas", () => {
         config_snapshot: snapshotWithPayload(rejectedPayloadBytes),
       },
     }).success).toBe(false);
+
+    const printMetrics = {
+      time: { normal_seconds: 3725.5, silent_seconds: null, preparation_seconds: 18.25 },
+      filament: {
+        used_length_mm: 12_345.6,
+        extruded_volume_mm3: 29_700.2,
+        weight_g: 36.8,
+        total_cost: 1.42,
+        wipe_tower_used_length_mm: 320.5,
+        wipe_tower_cost: 0.08,
+        per_extruder: [{
+          extruder_id: 0,
+          model_volume_mm3: 28_000,
+          support_volume_mm3: 500,
+          wipe_tower_volume_mm3: 700,
+          flushed_volume_mm3: 500.2,
+          total_volume_mm3: 29_700.2,
+        }],
+        per_feature: [{ feature: "outer_wall", used_length_mm: 2345.6, weight_g: 7.1 }],
+      },
+      changes: { tool_changes: 2, filament_changes: 3, extruder_changes: 2 },
+      travel: { distance_mm: 40_000, move_count: 900 },
+      initial_tool: 0,
+    };
+    const completedSlice = {
+      ...job,
+      state: "succeeded",
+      progress: 1,
+      result: { plate_index: 0, sliced: true, print_metrics: printMetrics },
+    };
+    expect(jobResultSchema.safeParse(completedSlice).success).toBe(true);
+    expect(jobResultSchema.safeParse({
+      ...completedSlice,
+      result: {
+        ...completedSlice.result,
+        print_metrics: {
+          ...printMetrics,
+          time: { ...printMetrics.time, normal_seconds: -1 },
+        },
+      },
+    }).success).toBe(false);
+    expect(jobResultSchema.safeParse({
+      ...completedSlice,
+      result: { plate_index: 0, sliced: true },
+    }).success).toBe(false);
   });
 
   it("allows only preflight-failed project saves to omit the snapshot", () => {
