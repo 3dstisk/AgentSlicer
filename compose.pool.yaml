@@ -1,0 +1,42 @@
+services:
+  agent-pool:
+    build:
+      context: .
+      dockerfile: docker/agent-pool/Dockerfile
+    image: "${AGENT_SLICER_POOL_IMAGE:-agent-slicer-pool:dev}"
+    environment:
+      TZ: "${TZ:-Europe/Prague}"
+      AGENT_SLICER_POOL_HOST: "0.0.0.0"
+      AGENT_SLICER_POOL_PORT: "8765"
+      AGENT_SLICER_POOL_TOKEN: "${AGENT_SLICER_POOL_TOKEN:?AGENT_SLICER_POOL_TOKEN must be set}"
+      AGENT_SLICER_POOL_ALLOWED_HOSTS: "${AGENT_SLICER_POOL_ALLOWED_HOSTS:-localhost,127.0.0.1,[::1]}"
+      AGENT_SLICER_POOL_ALLOWED_ORIGINS: "${AGENT_SLICER_POOL_ALLOWED_ORIGINS:-localhost,127.0.0.1,[::1]}"
+      AGENT_SLICER_POOL_SIZE: "${AGENT_SLICER_POOL_SIZE:-2}"
+      AGENT_SLICER_POOL_MAX_QUEUE: "${AGENT_SLICER_POOL_MAX_QUEUE:-100}"
+      AGENT_SLICER_POOL_ACQUIRE_WAIT_MS: "${AGENT_SLICER_POOL_ACQUIRE_WAIT_MS:-60000}"
+      AGENT_SLICER_POOL_LEASE_TTL_MS: "${AGENT_SLICER_POOL_LEASE_TTL_MS:-1800000}"
+      AGENT_SLICER_POOL_WORKER_IMAGE: "${AGENT_SLICER_IMAGE:-ghcr.io/3dstisk/agentslicer:latest}"
+      AGENT_SLICER_POOL_NETWORK: "agent-slicer-pool"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "127.0.0.1:${AGENT_SLICER_POOL_PORT:-8765}:8765"
+    networks:
+      - agent-slicer-pool
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8765/readyz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 7s
+      start_period: 180s
+      retries: 12
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+networks:
+  agent-slicer-pool:
+    name: agent-slicer-pool

@@ -16,6 +16,11 @@ and outputs are JSON; renders and desktop captures also return MCP image content
 `GET /livez` checks the adapter process, while `GET /readyz` and `/healthz`
 check the native bridge.
 
+One native Orca process is a single mutable session. Independent agents must use
+separate containers. The optional warm lease gateway described in
+[container-pool.md](container-pool.md) assigns one disposable container per
+agent and proxies this unchanged MCP API using a lease-specific bearer token.
+
 ## Transport and access control
 
 The default endpoint is `http://127.0.0.1:8765/mcp`. When configured, every MCP

@@ -10,6 +10,9 @@ image.
 
 The authoritative v1 tool and security contract is in
 [the MCP API documentation](../../docs/mcp-api.md).
+For concurrent agents, use the disposable-worker architecture in
+[the warm container pool guide](../../docs/container-pool.md); never share one
+Orca container between independent agents.
 
 Run it locally with a private bearer token:
 
