@@ -14,6 +14,7 @@ management token, then start the gateway:
 ```bash
 export AGENT_SLICER_POOL_TOKEN="$(openssl rand -hex 32)"
 export AGENT_SLICER_POOL_SIZE=2
+export AGENT_SLICER_POOL_ID=local
 export AGENT_SLICER_IMAGE=ghcr.io/3dstisk/agentslicer:latest
 docker compose -f compose.pool.yaml up --build -d
 ```
@@ -22,6 +23,13 @@ The gateway uses the Docker Engine socket to create and destroy workers on the
 private `agent-slicer-pool` network. Workers have anonymous writable state only:
 no workspace, output, screenshot, or Orca configuration volume is shared. The
 gateway rewrites each proxied request to the worker's private bearer token.
+
+Each gateway owns workers through its stable `AGENT_SLICER_POOL_ID`. Before it
+warms the pool at startup, it force-removes containers carrying both its managed
+label and that pool ID. This reclaims workers orphaned by a gateway crash without
+touching workers owned by another pool. Every concurrently running gateway on a
+Docker host must use a unique pool ID; reuse the same ID when restarting that
+gateway so recovery can find its earlier workers.
 
 Mounting `/var/run/docker.sock` grants Docker-host control. Run the pool gateway
 only as a trusted infrastructure component, never as tenant-supplied code.
@@ -88,6 +96,7 @@ queue returns `429`; an acquisition timeout returns `503`. Both include
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `AGENT_SLICER_POOL_TOKEN` | required | Management bearer token used only by `POST /leases`. |
+| `AGENT_SLICER_POOL_ID` | `default` | Stable worker owner ID; unique per concurrently running gateway. |
 | `AGENT_SLICER_POOL_SIZE` | `2` | Total warm plus leased workers. |
 | `AGENT_SLICER_POOL_MAX_QUEUE` | `100` | Maximum waiting lease requests. |
 | `AGENT_SLICER_POOL_ACQUIRE_WAIT_MS` | `60000` | Maximum server-side FIFO wait. |

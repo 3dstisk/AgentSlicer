@@ -5,6 +5,7 @@ export interface AgentPoolConfig {
   bindHost: string;
   port: number;
   bearerToken: string;
+  poolId: string;
   allowedHosts: readonly string[];
   allowedOrigins: readonly string[];
   poolSize: number;
@@ -87,6 +88,12 @@ export function loadPoolConfig(env: NodeJS.ProcessEnv = process.env): AgentPoolC
   if (!isLoopback(bindHost) && bearerToken.length < 48) {
     throw new Error("AGENT_SLICER_POOL_TOKEN must contain at least 48 characters outside loopback");
   }
+  const poolId = env.AGENT_SLICER_POOL_ID ?? "default";
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/.test(poolId)) {
+    throw new Error(
+      "AGENT_SLICER_POOL_ID must be 1-63 letters, digits, dots, underscores, or hyphens",
+    );
+  }
   const workerEnvironment = (env.AGENT_SLICER_POOL_WORKER_ENV ?? "")
     .split("\n")
     .map((entry) => entry.trim())
@@ -103,6 +110,7 @@ export function loadPoolConfig(env: NodeJS.ProcessEnv = process.env): AgentPoolC
     bindHost,
     port: integer(env.AGENT_SLICER_POOL_PORT, 8765, "AGENT_SLICER_POOL_PORT", 1, 65_535),
     bearerToken,
+    poolId,
     allowedHosts: csv(
       env.AGENT_SLICER_POOL_ALLOWED_HOSTS ?? "localhost,127.0.0.1,[::1]",
       "AGENT_SLICER_POOL_ALLOWED_HOSTS",

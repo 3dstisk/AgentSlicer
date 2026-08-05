@@ -11,6 +11,7 @@ const docker = new DockerEngineClient({
 const provisioner = new DockerWorkerProvisioner(docker, {
   image: config.workerImage,
   network: config.workerNetwork,
+  poolId: config.poolId,
   mcpPort: config.workerMcpPort,
   readyTimeoutMs: config.workerReadyTimeoutMs,
   readyPollMs: config.workerReadyPollMs,
@@ -25,6 +26,7 @@ const pool = new WarmWorkerPool(provisioner, {
   retryDelayMs: config.retryDelayMs,
 });
 
+const reconciledWorkers = await provisioner.reconcile();
 await pool.start();
 const http = createAgentPoolHttpServer(config, pool);
 http.server.listen(config.port, config.bindHost, () => {
@@ -33,6 +35,8 @@ http.server.listen(config.port, config.bindHost, () => {
     message: "AgentSlicer pool listening",
     host: config.bindHost,
     port: config.port,
+    pool_id: config.poolId,
+    reconciled_workers: reconciledWorkers,
     pool: pool.stats(),
   })}\n`);
 });

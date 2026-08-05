@@ -67,6 +67,7 @@ function poolConfig(overrides: Partial<AgentPoolConfig> = {}): AgentPoolConfig {
     bindHost: "127.0.0.1",
     port: 8765,
     bearerToken: "p".repeat(48),
+    poolId: "test-pool",
     allowedHosts: ["localhost", "127.0.0.1"],
     allowedOrigins: ["localhost", "127.0.0.1"],
     poolSize: 1,
@@ -233,13 +234,16 @@ describe("pool HTTP gateway", () => {
 });
 
 describe("Docker worker provisioner", () => {
-  it("creates isolated anonymous workers on the pool network and destroys them", async () => {
+  it("reconciles owned orphans and creates isolated anonymous workers", async () => {
     const calls: Array<{ method: string; path: string; body?: unknown }> = [];
     const docker: DockerApi = {
       async request(method, path, body) {
         calls.push({ method, path, body });
         if (path.startsWith("/containers/create")) {
           return { Id: "container-1" };
+        }
+        if (path.startsWith("/containers/json")) {
+          return [{ Id: "orphan-1" }, { Id: "orphan-2" }];
         }
         if (path === "/containers/container-1/json") {
           return {
@@ -254,10 +258,31 @@ describe("Docker worker provisioner", () => {
     const provisioner = new DockerWorkerProvisioner(docker, {
       image: "agent-slicer:test",
       network: "agent-slicer-pool",
+      poolId: "test-pool",
       readyTimeoutMs: 100,
       readyPollMs: 1,
       shmBytes: 1024 * 1024 * 1024,
       checkReady: async () => true,
+    });
+
+    await expect(provisioner.reconcile()).resolves.toBe(2);
+    const list = calls.find((call) => call.path.startsWith("/containers/json"));
+    const filters = new URL(`http://docker${list?.path}`).searchParams.get("filters");
+    expect(JSON.parse(filters ?? "null")).toEqual({
+      label: [
+        "com.3dstisk.agent-slicer.pool-managed=true",
+        "com.3dstisk.agent-slicer.pool-id=test-pool",
+      ],
+    });
+    expect(calls).toContainEqual({
+      method: "DELETE",
+      path: "/containers/orphan-1?force=true&v=true",
+      body: undefined,
+    });
+    expect(calls).toContainEqual({
+      method: "DELETE",
+      path: "/containers/orphan-2?force=true&v=true",
+      body: undefined,
     });
 
     const worker = await provisioner.provision();
@@ -272,6 +297,10 @@ describe("Docker worker provisioner", () => {
       },
       NetworkingConfig: {
         EndpointsConfig: { "agent-slicer-pool": {} },
+      },
+      Labels: {
+        "com.3dstisk.agent-slicer.pool-managed": "true",
+        "com.3dstisk.agent-slicer.pool-id": "test-pool",
       },
     });
     expect(create?.body).not.toHaveProperty("HostConfig.Binds");
@@ -304,10 +333,16 @@ describe("pool configuration", () => {
     expect(loadPoolConfig({
       AGENT_SLICER_POOL_TOKEN: "p".repeat(48),
       AGENT_SLICER_POOL_SIZE: "3",
+      AGENT_SLICER_POOL_ID: "production-a",
       AGENT_SLICER_POOL_WORKER_ENV: "ORCA_SCREEN_WIDTH=1280\nORCA_SCREEN_HEIGHT=720",
     })).toMatchObject({
       poolSize: 3,
+      poolId: "production-a",
       workerEnvironment: ["ORCA_SCREEN_WIDTH=1280", "ORCA_SCREEN_HEIGHT=720"],
     });
+    expect(() => loadPoolConfig({
+      AGENT_SLICER_POOL_TOKEN: "p".repeat(48),
+      AGENT_SLICER_POOL_ID: "invalid pool id",
+    })).toThrow("AGENT_SLICER_POOL_ID");
   });
 });

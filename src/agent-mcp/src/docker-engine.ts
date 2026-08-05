@@ -93,6 +93,7 @@ export class DockerEngineClient implements DockerApi {
 export interface DockerWorkerProvisionerOptions {
   image: string;
   network: string;
+  poolId: string;
   mcpPort?: number;
   readyTimeoutMs: number;
   readyPollMs: number;
@@ -110,6 +111,10 @@ interface InspectedContainer {
   NetworkSettings?: {
     Networks?: Record<string, { IPAddress?: unknown }>;
   };
+}
+
+interface ContainerSummary {
+  Id?: unknown;
 }
 
 function objectValue(value: unknown): Record<string, unknown> {
@@ -168,6 +173,7 @@ export class DockerWorkerProvisioner implements WorkerProvisioner {
           ],
           Labels: {
             "com.3dstisk.agent-slicer.pool-managed": "true",
+            "com.3dstisk.agent-slicer.pool-id": this.options.poolId,
           },
           HostConfig: {
             AutoRemove: false,
@@ -206,6 +212,39 @@ export class DockerWorkerProvisioner implements WorkerProvisioner {
 
   async destroy(worker: PoolWorker): Promise<void> {
     await this.destroyById(worker.id);
+  }
+
+  async reconcile(): Promise<number> {
+    const filters = encodeURIComponent(JSON.stringify({
+      label: [
+        "com.3dstisk.agent-slicer.pool-managed=true",
+        `com.3dstisk.agent-slicer.pool-id=${this.options.poolId}`,
+      ],
+    }));
+    const listed = await this.docker.request(
+      "GET",
+      `/containers/json?all=true&filters=${filters}`,
+      undefined,
+      [200],
+    );
+    if (!Array.isArray(listed)) {
+      throw new Error("Docker Engine returned an unexpected container list");
+    }
+    const containerIds = listed.map((value) => {
+      const summary = objectValue(value) as ContainerSummary;
+      if (typeof summary.Id !== "string" || summary.Id.length === 0) {
+        throw new Error("Docker Engine returned a container without an id");
+      }
+      return summary.Id;
+    });
+    await Promise.all(containerIds.map((containerId) =>
+      this.docker.request(
+        "DELETE",
+        `/containers/${encodeURIComponent(containerId)}?force=true&v=true`,
+        undefined,
+        [204, 404],
+      )));
+    return containerIds.length;
   }
 
   private async destroyById(containerId: string): Promise<void> {
