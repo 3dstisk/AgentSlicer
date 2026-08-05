@@ -1,18 +1,22 @@
 version: "3.8"
 
-# Portainer Docker Swarm stack for AgentSlicer.
-# Replace the three CHANGE_ME values before deploying the stack.
+# Portainer Docker Swarm stack for the AgentSlicer warm worker pool.
+#
+# Before deployment:
+# 1. Replace all four CHANGE_ME values.
+# 2. The pool token must contain at least 48 random characters.
+# 3. Configure the same pool token as AGENT_SLICER_POOL_TOKEN in Email Assistant and AI Ops.
+# 4. Configure AGENT_SLICER_POOL_URL=https://agent-slicer.3dstisk.com in both apps.
 services:
-  agent-slicer:
-    # GHCR must contain this tag and be public, or Portainer must have
-    # authenticated read access to the private package.
+  agent-slicer-desktop:
+    # This persistent instance is only for the operator browser desktop. Agent
+    # integrations use the separate pool service below.
     image: ghcr.io/3dstisk/agentslicer:latest
     environment:
       PUID: "1000"
       PGID: "1000"
       TZ: Europe/Prague
 
-      # Browser desktop settings.
       PIXELFLUX_WAYLAND: "false"
       SELKIES_MANUAL_WIDTH: "1920"
       SELKIES_MANUAL_HEIGHT: "1080"
@@ -28,16 +32,15 @@ services:
       SELKIES_COMMAND_ENABLED: "false"
       SELKIES_ENABLE_SHARING: "false"
 
-      # Protect the browser desktop exposed through Traefik.
       CUSTOM_USER: 'CHANGE_ME_AGENT_SLICER_USER'
       PASSWORD: 'CHANGE_ME_AGENT_SLICER_PASSWORD'
 
-      # MCP server. Use a long random token without Compose interpolation syntax.
+      # The desktop's MCP port remains private but must still use a strong token.
       AGENT_SLICER_MCP_HOST: 0.0.0.0
       AGENT_SLICER_MCP_PORT: "8765"
-      AGENT_SLICER_TOKEN: 'CHANGE_ME_LONG_RANDOM_TOKEN'
-      AGENT_SLICER_ALLOWED_HOSTS: agent-slicer.3dstisk.com
-      AGENT_SLICER_ALLOWED_ORIGINS: agent-slicer.3dstisk.com
+      AGENT_SLICER_TOKEN: 'CHANGE_ME_LONG_RANDOM_DESKTOP_MCP_TOKEN'
+      AGENT_SLICER_ALLOWED_HOSTS: localhost,127.0.0.1,[::1]
+      AGENT_SLICER_ALLOWED_ORIGINS: localhost,127.0.0.1,[::1]
       AGENT_SLICER_BRIDGE_SOCKET: /run/agent-slicer/orca-agent.sock
       AGENT_SLICER_MAX_IMPORT_BYTES: "536870912"
       AGENT_SLICER_MAX_UPLOAD_BYTES: "536870912"
@@ -99,38 +102,105 @@ services:
         monitor: 180s
       labels:
         - "traefik.enable=true"
+        - "traefik.http.routers.3dstisk_agent_slicer_desktop.rule=Host(`agent-slicer.3dstisk.com`)"
+        - "traefik.http.routers.3dstisk_agent_slicer_desktop.entrypoints=websecure"
+        - "traefik.http.routers.3dstisk_agent_slicer_desktop.tls=true"
+        - "traefik.http.routers.3dstisk_agent_slicer_desktop.priority=10"
+        - "traefik.http.routers.3dstisk_agent_slicer_desktop.service=3dstisk_agent_slicer_desktop"
+        - "traefik.http.services.3dstisk_agent_slicer_desktop.loadbalancer.server.port=3000"
+        - "traefik.swarm.network=nginx-proxy-public"
 
-        # Browser desktop: https://agent-slicer.3dstisk.com/
-        - "traefik.http.routers.3dstisk_agent_slicer.rule=Host(`agent-slicer.3dstisk.com`)"
-        - "traefik.http.routers.3dstisk_agent_slicer.entrypoints=websecure"
-        - "traefik.http.routers.3dstisk_agent_slicer.tls=true"
-        - "traefik.http.routers.3dstisk_agent_slicer.priority=10"
-        - "traefik.http.routers.3dstisk_agent_slicer.service=3dstisk_agent_slicer"
-        - "traefik.http.services.3dstisk_agent_slicer.loadbalancer.server.port=3000"
+  agent-slicer-pool:
+    # The pool image manages leases. It creates disposable workers from the
+    # separate AgentSlicer image through the manager node's Docker socket.
+    image: ghcr.io/3dstisk/agentslicer-pool:latest
+    environment:
+      TZ: Europe/Prague
+      AGENT_SLICER_POOL_HOST: 0.0.0.0
+      AGENT_SLICER_POOL_PORT: "8765"
+      AGENT_SLICER_POOL_TOKEN: 'CHANGE_ME_LONG_RANDOM_POOL_TOKEN'
+      AGENT_SLICER_POOL_ID: production
+      AGENT_SLICER_POOL_ALLOWED_HOSTS: agent-slicer.3dstisk.com
+      AGENT_SLICER_POOL_ALLOWED_ORIGINS: agent-slicer.3dstisk.com
 
-        # MCP API.
-        - "traefik.http.routers.3dstisk_agent_slicer_mcp.rule=Host(`agent-slicer.3dstisk.com`) && PathPrefix(`/mcp`)"
-        - "traefik.http.routers.3dstisk_agent_slicer_mcp.entrypoints=websecure"
-        - "traefik.http.routers.3dstisk_agent_slicer_mcp.tls=true"
-        - "traefik.http.routers.3dstisk_agent_slicer_mcp.priority=100"
-        - "traefik.http.routers.3dstisk_agent_slicer_mcp.service=3dstisk_agent_slicer_mcp"
+      # Two workers can serve two agents concurrently. Additional lease
+      # requests wait in the bounded FIFO queue.
+      AGENT_SLICER_POOL_SIZE: "2"
+      AGENT_SLICER_POOL_MAX_QUEUE: "100"
+      AGENT_SLICER_POOL_ACQUIRE_WAIT_MS: "60000"
+      AGENT_SLICER_POOL_LEASE_TTL_MS: "1800000"
+      AGENT_SLICER_POOL_RETRY_DELAY_MS: "5000"
 
-        # Uploads use the MCP service and its bearer authentication, not desktop Basic auth.
-        - "traefik.http.routers.3dstisk_agent_slicer_uploads.rule=Host(`agent-slicer.3dstisk.com`) && PathPrefix(`/uploads`)"
-        - "traefik.http.routers.3dstisk_agent_slicer_uploads.entrypoints=websecure"
-        - "traefik.http.routers.3dstisk_agent_slicer_uploads.tls=true"
-        - "traefik.http.routers.3dstisk_agent_slicer_uploads.priority=110"
-        - "traefik.http.routers.3dstisk_agent_slicer_uploads.service=3dstisk_agent_slicer_mcp"
+      AGENT_SLICER_POOL_WORKER_IMAGE: ghcr.io/3dstisk/agentslicer:latest
+      AGENT_SLICER_POOL_NETWORK: agent-slicer-pool
+      AGENT_SLICER_POOL_WORKER_MCP_PORT: "8765"
+      AGENT_SLICER_POOL_WORKER_READY_TIMEOUT_MS: "180000"
+      AGENT_SLICER_POOL_WORKER_READY_POLL_MS: "1000"
+      AGENT_SLICER_POOL_WORKER_SHM_BYTES: "1073741824"
+      AGENT_SLICER_POOL_WORKER_ENV: |-
+        AGENT_SLICER_MAX_IMPORT_BYTES=536870912
+        AGENT_SLICER_MAX_UPLOAD_BYTES=536870912
+        AGENT_SLICER_UPLOAD_TTL_MS=900000
+        AGENT_SLICER_SCREENSHOT_ROOTS=/screenshots/mcp
+        AGENT_SLICER_DESKTOP_SCREENSHOT_ROOT=/screenshots
+        AGENT_SLICER_CAPTURE_EXECUTABLE=/usr/local/bin/capture-orca
 
-        # Generated outputs use the MCP service and the same bearer authentication.
-        - "traefik.http.routers.3dstisk_agent_slicer_outputs.rule=Host(`agent-slicer.3dstisk.com`) && (Path(`/outputs`) || PathPrefix(`/outputs/`))"
-        - "traefik.http.routers.3dstisk_agent_slicer_outputs.entrypoints=websecure"
-        - "traefik.http.routers.3dstisk_agent_slicer_outputs.tls=true"
-        - "traefik.http.routers.3dstisk_agent_slicer_outputs.priority=110"
-        - "traefik.http.routers.3dstisk_agent_slicer_outputs.service=3dstisk_agent_slicer_mcp"
+    # This service is trusted infrastructure. Docker socket access lets it
+    # create and destroy only its labelled disposable worker containers.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
-        - "traefik.http.services.3dstisk_agent_slicer_mcp.loadbalancer.server.port=8765"
+    networks:
+      - agent-slicer-pool
+      - nginx-proxy-public
 
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8765/readyz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 7s
+      retries: 12
+      start_period: 180s
+
+    stop_grace_period: 90s
+
+    deploy:
+      mode: replicated
+      replicas: 1
+      placement:
+        constraints:
+          # The gateway must run on a manager because it uses that node's
+          # Docker Engine socket to manage standalone worker containers.
+          - node.role == manager
+          - node.platform.arch == x86_64
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+        window: 180s
+      update_config:
+        parallelism: 1
+        order: stop-first
+        monitor: 180s
+        failure_action: rollback
+      rollback_config:
+        parallelism: 1
+        order: stop-first
+        monitor: 180s
+      labels:
+        - "traefik.enable=true"
+
+        # Lease management, MCP, uploads, outputs, and health all reach the
+        # pool gateway. Authentication is enforced by the gateway itself.
+        - "traefik.http.routers.3dstisk_agent_slicer_pool.rule=Host(`agent-slicer.3dstisk.com`) && (Path(`/leases`) || PathPrefix(`/leases/`) || Path(`/mcp`) || PathPrefix(`/mcp/`) || PathPrefix(`/uploads/`) || Path(`/outputs`) || PathPrefix(`/outputs/`) || Path(`/livez`) || Path(`/readyz`) || Path(`/healthz`))"
+        - "traefik.http.routers.3dstisk_agent_slicer_pool.entrypoints=websecure"
+        - "traefik.http.routers.3dstisk_agent_slicer_pool.tls=true"
+        - "traefik.http.routers.3dstisk_agent_slicer_pool.priority=100"
+        - "traefik.http.routers.3dstisk_agent_slicer_pool.service=3dstisk_agent_slicer_pool"
+        - "traefik.http.services.3dstisk_agent_slicer_pool.loadbalancer.server.port=8765"
         - "traefik.swarm.network=nginx-proxy-public"
 
 volumes:
@@ -144,5 +214,12 @@ volumes:
     driver: local
 
 networks:
+  # The gateway and its standalone disposable workers share this fixed-name,
+  # attachable overlay network. It is not connected to Traefik.
+  agent-slicer-pool:
+    name: agent-slicer-pool
+    driver: overlay
+    attachable: true
+
   nginx-proxy-public:
     external: true

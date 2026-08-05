@@ -1,4 +1,4 @@
-name: AgentSlicer x86_64 image
+name: AgentSlicer x86_64 images
 
 on:
   push:
@@ -28,7 +28,7 @@ jobs:
       artifact: ${{ github.sha }}-tests-linux-x86_64
 
   publish:
-    name: Test image and publish push builds
+    name: Test and publish worker plus pool images
     needs: [build-linux-x86_64, test-linux-x86_64]
     runs-on: ubuntu-24.04
     permissions:
@@ -88,6 +88,16 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/agentslicer
+          tags: |
+            type=ref,event=tag
+            type=raw,value=latest,enable=${{ github.event_name == 'push' }}
+            type=sha,format=long,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Generate pool container metadata
+        id: pool_meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/agentslicer-pool
           tags: |
             type=ref,event=tag
             type=raw,value=latest,enable=${{ github.event_name == 'push' }}
@@ -157,3 +167,16 @@ jobs:
             test -n "$tag"
             docker push "$tag"
           done <<< "$IMAGE_TAGS"
+
+      - name: Build and push AgentSlicer pool gateway
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/agent-pool/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.pool_meta.outputs.tags }}
+          labels: ${{ steps.pool_meta.outputs.labels }}
+          cache-from: type=gha,scope=agent-slicer-pool
+          cache-to: type=gha,mode=max,scope=agent-slicer-pool
