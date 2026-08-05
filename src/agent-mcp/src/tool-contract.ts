@@ -439,6 +439,31 @@ export const toolSchemas = {
       height: z.number().int().min(64).max(2048).default(1024),
     })
     .strict(),
+  toolpath_render: z
+    .object({
+      ...projectWithRevision,
+      slice_job_id: opaqueId,
+      views: z
+        .array(z.enum(["iso", "top", "front", "rear", "left", "right", "bottom", "top_front"]))
+        .min(1)
+        .max(6)
+        .refine((views) => new Set(views).size === views.length, {
+          message: "Toolpath render views must be unique",
+        }),
+      width: z.number().int().min(64).max(2048).default(1024),
+      height: z.number().int().min(64).max(2048).default(1024),
+      layer_range: z
+        .object({
+          start: unsignedSafeInteger,
+          end: unsignedSafeInteger,
+        })
+        .strict()
+        .refine((range) => range.start <= range.end, {
+          message: "Layer range start must not exceed end",
+        })
+        .optional(),
+    })
+    .strict(),
   desktop_capture: z
     .object({
       ...project,
@@ -457,6 +482,7 @@ export const toolNames = [
   "object_auto_orient",
   "scene_arrange",
   "scene_render",
+  "toolpath_render",
   "desktop_capture",
   "presets_list",
   "presets_select",
@@ -500,6 +526,8 @@ const descriptions: Record<ToolName, string> = {
   scene_arrange: "Start Orca's native arrange operation for the active project.",
   scene_render:
     "Render one to six clean PNG views of the active scene as inline MCP image content. Returned paths are internal identifiers, not HTTP URLs.",
+  toolpath_render:
+    "Render one to six PNG views of a completed slice using Orca line-type colors. Includes the enabled extrusion features and seam markers; excludes travel, wipe, retract, unretract, tool/filament changes, pauses, and custom G-code motions. Returns the exact color legend and rendered zero-based layer range.",
   desktop_capture:
     "Capture the complete Orca desktop as inline MCP image content for diagnostics, including modal dialogs. The returned path is not an HTTP URL.",
   presets_list:
@@ -1101,7 +1129,8 @@ export function toBridgeParams(
         : {}),
     };
   }
-  if (method === "scene_render" && Array.isArray(params.views)) {
+  if ((method === "scene_render" || method === "toolpath_render") &&
+      Array.isArray(params.views)) {
     return {
       ...params,
       views: params.views.map((view) => (view === "top_front" ? "topfront" : view)),
@@ -1184,6 +1213,72 @@ const mcpRenderResultSchema = z.object({
   }).strict()).min(1).max(6),
 }).strict();
 
+const layerRangeSchema = z.object({
+  start: unsignedSafeInteger,
+  end: unsignedSafeInteger,
+}).strict();
+
+const toolpathLegendItemSchema = z.object({
+  feature: z.string().min(1).max(64),
+  label: z.string().min(1).max(64),
+  color: z.string().regex(/^#[0-9A-F]{6}$/),
+  kind: z.enum(["extrusion", "marker"]),
+}).strict();
+
+const excludedToolpathMoveSchema = z.enum([
+  "travel",
+  "wipe",
+  "retract",
+  "unretract",
+  "tool_change",
+  "filament_change",
+  "pause",
+  "custom_gcode",
+]);
+
+const nativeToolpathRenderResultSchema = z.object({
+  project_id: opaqueId,
+  revision,
+  slice_job_id: opaqueId,
+  plate_index: unsignedSafeInteger,
+  available_layer_range: layerRangeSchema,
+  rendered_layer_range: layerRangeSchema,
+  legend: z.array(toolpathLegendItemSchema).length(13).refine(
+    (items) => new Set(items.map((item) => item.feature)).size === items.length,
+    "Toolpath legend features must be unique",
+  ),
+  excluded_move_types: z.array(excludedToolpathMoveSchema).length(8).refine(
+    (items) => new Set(items).size === items.length,
+    "Excluded toolpath move types must be unique",
+  ),
+  images: z.array(z.object({
+    path: z.string(),
+    view: z.string(),
+    width: z.number().int().positive(),
+    height: z.number().int().positive(),
+    mime_type: z.literal("image/png"),
+    bytes: z.number().int().positive(),
+    segment_count: unsignedSafeInteger,
+    seam_count: unsignedSafeInteger,
+  }).strict()).min(1).max(6),
+}).strict();
+
+const mcpToolpathRenderResultSchema = nativeToolpathRenderResultSchema
+  .omit({ images: true })
+  .extend({
+    images: z.array(z.object({
+      path: z.string(),
+      view: z.enum(["iso", "top", "front", "rear", "left", "right", "bottom", "top_front"]),
+      width: z.number().int().positive(),
+      height: z.number().int().positive(),
+      mime_type: z.literal("image/png"),
+      bytes: z.number().int().positive(),
+      segment_count: unsignedSafeInteger,
+      seam_count: unsignedSafeInteger,
+    }).strict()).min(1).max(6),
+  })
+  .strict();
+
 const desktopResultSchema = z.object({
   project_id: opaqueId,
   revision,
@@ -1197,6 +1292,98 @@ const desktopResultSchema = z.object({
   }).strict(),
 }).strict();
 
+type NativeRenderImage = {
+  path: string;
+  view: string;
+  width?: number;
+  height?: number;
+  [key: string]: unknown;
+};
+
+async function readRenderedPngs(
+  dependencies: ToolDependencies,
+  nativeParams: Record<string, unknown>,
+  nativeImages: readonly NativeRenderImage[],
+) {
+  const capturedIdentities = new Map<
+    string,
+    Awaited<ReturnType<typeof readInternalPng>>["fileIdentity"]
+  >();
+  try {
+    const readPng = dependencies.readPng ?? readInternalPng;
+    const requestedWidth = nativeParams.width as number;
+    const requestedHeight = nativeParams.height as number;
+    const requestedViews = nativeParams.views as string[];
+    if (nativeImages.length !== requestedViews.length) {
+      throw new Error("Native render returned a different image count than requested");
+    }
+    if (new Set(nativeImages.map((image) => image.view)).size !== nativeImages.length) {
+      throw new Error("Native render returned duplicate views");
+    }
+    const settledImages = await Promise.allSettled(
+      nativeImages.map(async (image, index) => {
+        if (image.width !== requestedWidth || image.height !== requestedHeight ||
+            image.view !== requestedViews[index]) {
+          throw new Error("Native render metadata does not match the requested render");
+        }
+        const png = await readPng(
+          image.path,
+          dependencies.screenshotRoots,
+          dependencies.maxImageBytes,
+        );
+        // readInternalPng returned a descriptor-pinned, fully parsed PNG, so
+        // cleanup may now be tied to this exact file snapshot even if later
+        // semantic checks reject its dimensions.
+        capturedIdentities.set(image.path, png.fileIdentity);
+        if (png.width !== requestedWidth || png.height !== requestedHeight) {
+          throw new Error("Rendered PNG dimensions do not match the requested render");
+        }
+        return { metadata: { ...image, view: toPublicRenderView(image.view) }, png };
+      }),
+    );
+    // Every task must settle before cleanup snapshots capturedIdentities. A
+    // fast validation error must not leave a slower, already-opened PNG
+    // orphaned after it later records its pinned file identity.
+    const failedImage = settledImages.find((result) => result.status === "rejected");
+    if (failedImage?.status === "rejected") {
+      throw failedImage.reason;
+    }
+    return settledImages.map((result) => {
+      if (result.status !== "fulfilled") {
+        throw new Error("Rendered PNG validation did not settle");
+      }
+      return result.value;
+    });
+  } finally {
+    await Promise.all(
+      [...capturedIdentities].map(([path, expectedFile]) => {
+        return (dependencies.removePng ?? unlinkInternalPng)(
+          path,
+          dependencies.screenshotRoots,
+          { expectedFile },
+        );
+      }),
+    );
+  }
+}
+
+function inlineRenderResult(
+  structuredContent: Record<string, unknown>,
+  images: Awaited<ReturnType<typeof readRenderedPngs>>,
+): CallToolResult {
+  return {
+    content: [
+      { type: "text", text: JSON.stringify(structuredContent) },
+      ...images.map(({ png }) => ({
+        type: "image" as const,
+        data: png.data,
+        mimeType: png.mimeType,
+      })),
+    ],
+    structuredContent,
+  };
+}
+
 async function sceneRender(
   dependencies: ToolDependencies,
   params: Record<string, unknown>,
@@ -1206,89 +1393,46 @@ async function sceneRender(
     const bridgeResult = renderResultSchema.parse(
       await dependencies.bridge.call("scene_render", nativeParams),
     );
-    const capturedIdentities = new Map<
-      string,
-      Awaited<ReturnType<typeof readInternalPng>>["fileIdentity"]
-    >();
-    try {
-      const readPng = dependencies.readPng ?? readInternalPng;
-      const requestedWidth = nativeParams.width as number;
-      const requestedHeight = nativeParams.height as number;
-      const requestedViews = nativeParams.views as string[];
-      if (bridgeResult.images.length !== requestedViews.length) {
-        throw new Error("Native render returned a different image count than requested");
-      }
-      if (new Set(bridgeResult.images.map((image) => image.view)).size !==
-          bridgeResult.images.length) {
-        throw new Error("Native render returned duplicate views");
-      }
-      const settledImages = await Promise.allSettled(
-        bridgeResult.images.map(async (image, index) => {
-          if (image.width !== requestedWidth || image.height !== requestedHeight ||
-              image.view !== requestedViews[index]) {
-            throw new Error("Native render metadata does not match the requested render");
-          }
-          const png = await readPng(
-            image.path,
-            dependencies.screenshotRoots,
-            dependencies.maxImageBytes,
-          );
-          // readInternalPng returned a descriptor-pinned, fully parsed PNG, so
-          // cleanup may now be tied to this exact file snapshot even if later
-          // semantic checks reject its dimensions.
-          capturedIdentities.set(image.path, png.fileIdentity);
-          if (png.width !== requestedWidth || png.height !== requestedHeight) {
-            throw new Error("Rendered PNG dimensions do not match the requested render");
-          }
-          return { metadata: { ...image, view: toPublicRenderView(image.view) }, png };
-        }),
-      );
-      // Every task must settle before cleanup snapshots capturedIdentities. A
-      // fast validation error must not leave a slower, already-opened PNG
-      // orphaned after it later records its pinned file identity.
-      const failedImage = settledImages.find((result) => result.status === "rejected");
-      if (failedImage?.status === "rejected") {
-        throw failedImage.reason;
-      }
-      const images = settledImages.map((result) => {
-        if (result.status !== "fulfilled") {
-          throw new Error("Rendered PNG validation did not settle");
-        }
-        return result.value;
-      });
-      const structuredContent = mcpRenderResultSchema.parse({
-        ...bridgeResult,
-        images: images.map(({ metadata, png }) => ({
-          ...metadata,
-          path: png.path,
-          width: png.width,
-          height: png.height,
-          bytes: png.bytes,
-          mime_type: png.mimeType,
-        })),
-      });
-      return {
-        content: [
-          { type: "text", text: JSON.stringify(structuredContent) },
-          ...images.map(({ png }) => ({
-            type: "image" as const,
-            data: png.data,
-            mimeType: png.mimeType,
-          })),
-        ],
-        structuredContent,
-      };
-    } finally {
-      await Promise.all(
-        [...capturedIdentities].map(([path, expectedFile]) => {
-          return (dependencies.removePng ?? unlinkInternalPng)(
-            path,
-            dependencies.screenshotRoots,
-            { expectedFile },
-          );
-        }),
-      );
-    }
+    const images = await readRenderedPngs(dependencies, nativeParams, bridgeResult.images);
+    const structuredContent = mcpRenderResultSchema.parse({
+      ...bridgeResult,
+      images: images.map(({ metadata, png }) => ({
+        ...metadata,
+        path: png.path,
+        width: png.width,
+        height: png.height,
+        bytes: png.bytes,
+        mime_type: png.mimeType,
+      })),
+    });
+    return inlineRenderResult(structuredContent, images);
+  } catch (error) {
+    return toolErrorResult(error);
+  }
+}
+
+async function toolpathRender(
+  dependencies: ToolDependencies,
+  params: Record<string, unknown>,
+): Promise<CallToolResult> {
+  try {
+    const nativeParams = toBridgeParams("toolpath_render", params);
+    const bridgeResult = nativeToolpathRenderResultSchema.parse(
+      await dependencies.bridge.call("toolpath_render", nativeParams),
+    );
+    const images = await readRenderedPngs(dependencies, nativeParams, bridgeResult.images);
+    const structuredContent = mcpToolpathRenderResultSchema.parse({
+      ...bridgeResult,
+      images: images.map(({ metadata, png }) => ({
+        ...metadata,
+        path: png.path,
+        width: png.width,
+        height: png.height,
+        bytes: png.bytes,
+        mime_type: png.mimeType,
+      })),
+    });
+    return inlineRenderResult(structuredContent, images);
   } catch (error) {
     return toolErrorResult(error);
   }
@@ -1448,6 +1592,15 @@ export function registerAgentTools(server: McpServer, dependencies: AgentToolDep
       outputSchema: mcpRenderResultSchema,
     },
     (params) => sceneRender(dependencies, params),
+  );
+  server.registerTool(
+    "toolpath_render",
+    {
+      description: descriptions.toolpath_render,
+      inputSchema: toolSchemas.toolpath_render,
+      outputSchema: mcpToolpathRenderResultSchema,
+    },
+    (params) => toolpathRender(dependencies, params),
   );
   server.registerTool(
     "desktop_capture",

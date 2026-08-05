@@ -3,6 +3,7 @@
 #include "AgentProtocol.hpp"
 #include "AgentImportLimits.hpp"
 #include "AgentSettingValidation.hpp"
+#include "AgentToolpathRenderer.hpp"
 #include "RenderArtifactRollback.hpp"
 #include "SecureFile.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
@@ -1170,6 +1171,138 @@ public:
         }
         rollback.commit();
         return {{"images", std::move(images)}};
+    }
+
+    nlohmann::json render_toolpaths(
+        const nlohmann::json& request,
+        const std::filesystem::path& screenshot_root,
+        std::size_t plate_index) override
+    {
+        assert_gui_thread();
+        PartPlateList& plates = m_plater.get_partplate_list();
+        if (plate_index >= static_cast<std::size_t>(plates.get_plate_count()))
+            throw AgentError(ErrorCode::InvalidRequest, "Sliced plate no longer exists");
+        PartPlate* plate = plates.get_plate(static_cast<int>(plate_index));
+        if (plate == nullptr || plate->get_slice_result() == nullptr ||
+            !plate->is_slice_result_valid())
+            throw AgentError(ErrorCode::InvalidRequest,
+                             "Sliced plate has no valid G-code toolpaths");
+
+        std::error_code directory_error;
+        std::filesystem::create_directories(screenshot_root, directory_error);
+        if (directory_error)
+            throw AgentError(ErrorCode::RenderFailed, "Unable to create screenshot directory");
+
+        std::optional<ToolpathLayerRange> requested_layers;
+        if (request.contains("layer_range")) {
+            requested_layers = ToolpathLayerRange {
+                request.at("layer_range").at("start").get<unsigned int>(),
+                request.at("layer_range").at("end").get<unsigned int>()
+            };
+        }
+        const unsigned int width = request.at("width").get<unsigned int>();
+        const unsigned int height = request.at("height").get<unsigned int>();
+        GCodeProcessorResult* gcode = plate->get_slice_result();
+        gcode->lock();
+        struct ResultUnlock {
+            GCodeProcessorResult* result;
+            ~ResultUnlock() { result->unlock(); }
+        } unlock {gcode};
+
+        nlohmann::json images = nlohmann::json::array();
+        std::optional<ToolpathLayerRange> available_layers;
+        std::optional<ToolpathLayerRange> rendered_layers;
+        RenderArtifactRollback rollback;
+        try {
+            for (const auto& entry : request.at("views")) {
+                const std::string view = entry.get<std::string>();
+                ToolpathRenderResult rendered;
+                try {
+                    rendered = ::Slic3r::GUI::Agent::render_toolpaths(
+                        *gcode, {width, height, view, requested_layers});
+                } catch (const std::invalid_argument& error) {
+                    throw AgentError(ErrorCode::InvalidRequest,
+                                     "Invalid sliced toolpath render request",
+                                     {{"view", view}, {"error", error.what()}});
+                } catch (const std::exception& error) {
+                    throw AgentError(ErrorCode::RenderFailed,
+                                     "Unable to render sliced toolpaths",
+                                     {{"view", view}, {"error", error.what()}});
+                }
+                auto png = GCodeThumbnails::compress_thumbnail(
+                    rendered.image, GCodeThumbnailsFormat::PNG);
+                if (!png || png->data == nullptr || png->size == 0)
+                    throw AgentError(ErrorCode::RenderFailed,
+                                     "Unable to encode toolpath render", {{"view", view}});
+
+                SecureArtifact artifact;
+                try {
+                    artifact = write_secure_artifact(
+                        screenshot_root, "toolpath-" + view + "-", ".png",
+                        png->data, png->size);
+                } catch (const std::exception&) {
+                    throw AgentError(ErrorCode::RenderFailed,
+                                     "Unable to write toolpath render", {{"view", view}});
+                }
+                rollback.track(artifact);
+                const ArtifactFileIdentity current = trusted_artifact_identity(artifact.path);
+                if (current.device != artifact.identity.device ||
+                    current.inode != artifact.identity.inode)
+                    throw AgentError(
+                        ErrorCode::RenderFailed,
+                        "Toolpath render artifact changed before publication",
+                        {{"view", view}});
+                images.push_back({
+                    {"view", view},
+                    {"path", artifact.path.string()},
+                    {"width", width},
+                    {"height", height},
+                    {"mime_type", "image/png"},
+                    {"bytes", png->size},
+                    {"segment_count", rendered.segment_count},
+                    {"seam_count", rendered.seam_count}
+                });
+                available_layers = rendered.available_layers;
+                rendered_layers = rendered.rendered_layers;
+            }
+        } catch (...) {
+            const std::exception_ptr render_failure = std::current_exception();
+            try {
+                rollback.rollback();
+            } catch (const std::exception& cleanup_error) {
+                throw AgentError(
+                    ErrorCode::RenderFailed,
+                    "Toolpath render failed and its artifacts could not be cleaned safely",
+                    {{"cleanup_error", cleanup_error.what()}});
+            }
+            std::rethrow_exception(render_failure);
+        }
+        rollback.commit();
+
+        nlohmann::json legend = nlohmann::json::array();
+        for (const ToolpathFeatureStyle& style : toolpath_feature_styles()) {
+            legend.push_back({
+                {"feature", style.key}, {"label", style.label},
+                {"color", style.hex}, {"kind", "extrusion"}
+            });
+        }
+        const ToolpathFeatureStyle& seam = toolpath_seam_style();
+        legend.push_back({
+            {"feature", seam.key}, {"label", seam.label},
+            {"color", seam.hex}, {"kind", "marker"}
+        });
+        return {
+            {"plate_index", plate_index},
+            {"available_layer_range", {
+                {"start", available_layers->start}, {"end", available_layers->end}}},
+            {"rendered_layer_range", {
+                {"start", rendered_layers->start}, {"end", rendered_layers->end}}},
+            {"legend", std::move(legend)},
+            {"excluded_move_types", {
+                "travel", "wipe", "retract", "unretract", "tool_change",
+                "filament_change", "pause", "custom_gcode"}},
+            {"images", std::move(images)}
+        };
     }
 
     nlohmann::json presets_list(const nlohmann::json& request) const override

@@ -296,6 +296,8 @@ nlohmann::json AgentController::handle_prepared(const PreparedRequest& prepared)
             return arrange_scene(request.params);
         if (request.method == "scene_render")
             return render_scene(request.params);
+        if (request.method == "toolpath_render")
+            return render_toolpaths(request.params);
         if (request.method == "desktop_capture")
             return desktop_capture(request.params);
         if (request.method == "presets_list")
@@ -625,6 +627,7 @@ nlohmann::json AgentController::status() const
         {"job_count", m_jobs.size()},
         {"capabilities", {"project_foundation", "model_import", "scene_inspection",
                           "object_transform", "object_auto_orient", "scene_arrange", "scene_render",
+                          "toolpath_render",
                           "desktop_capture", "preset_control", "settings_control",
                           "job_registry", "slice", "gcode_export", "project_save"}}
     };
@@ -833,6 +836,92 @@ nlohmann::json AgentController::render_scene(const nlohmann::json& params)
     nlohmann::json result = m_facade->render_scene(request, m_screenshot_root);
     result["project_id"] = *m_project_id;
     result["revision"] = m_revision;
+    return result;
+}
+
+nlohmann::json AgentController::render_toolpaths(const nlohmann::json& params)
+{
+    static const std::set<std::string> allowed_views {
+        "iso", "topfront", "left", "right", "top", "bottom", "front", "rear"
+    };
+    if (!params.contains("expected_revision"))
+        throw AgentError(ErrorCode::InvalidRequest, "expected_revision is required");
+    if (!params.contains("slice_job_id") || !params.at("slice_job_id").is_string())
+        throw AgentError(ErrorCode::InvalidRequest, "slice_job_id must be a string");
+    if (!params.contains("views") || !params.at("views").is_array() ||
+        params.at("views").empty() || params.at("views").size() > 6)
+        throw AgentError(ErrorCode::InvalidRequest,
+                         "views must contain between one and six entries");
+    std::set<std::string> unique_views;
+    for (const auto& view : params.at("views")) {
+        if (!view.is_string() || allowed_views.count(view.get<std::string>()) == 0)
+            throw AgentError(ErrorCode::InvalidRequest,
+                             "Unsupported toolpath render view", {{"view", view}});
+        if (!unique_views.insert(view.get<std::string>()).second)
+            throw AgentError(ErrorCode::InvalidRequest,
+                             "Toolpath render views must be unique");
+    }
+    const auto dimension = [&params](const char* key) {
+        if (!params.contains(key))
+            return 1024u;
+        if (!params.at(key).is_number_unsigned() && !params.at(key).is_number_integer())
+            throw AgentError(ErrorCode::InvalidRequest,
+                             std::string(key) + " must be an integer");
+        const std::int64_t value = params.at(key).get<std::int64_t>();
+        if (value < 64 || value > 2048)
+            throw AgentError(ErrorCode::InvalidRequest,
+                             std::string(key) + " must be between 64 and 2048");
+        return static_cast<unsigned int>(value);
+    };
+    nlohmann::json request = params;
+    request["width"] = dimension("width");
+    request["height"] = dimension("height");
+    if (params.contains("layer_range")) {
+        const nlohmann::json& range = params.at("layer_range");
+        if (!range.is_object() || range.size() != 2 || !range.contains("start") ||
+            !range.contains("end"))
+            throw AgentError(ErrorCode::InvalidRequest,
+                             "layer_range must contain only start and end");
+        const auto layer = [&range](const char* key) {
+            const nlohmann::json& value = range.at(key);
+            const bool unsigned_value = value.is_number_unsigned();
+            const bool signed_value = value.is_number_integer() && !unsigned_value &&
+                                      value.get<std::int64_t>() >= 0;
+            if (!unsigned_value && !signed_value)
+                throw AgentError(ErrorCode::InvalidRequest,
+                                 std::string("layer_range.") + key +
+                                     " must be an unsigned integer");
+            const std::uint64_t raw = unsigned_value ? value.get<std::uint64_t>() :
+                static_cast<std::uint64_t>(value.get<std::int64_t>());
+            if (raw > std::numeric_limits<unsigned int>::max())
+                throw AgentError(ErrorCode::InvalidRequest,
+                                 std::string("layer_range.") + key + " is too large");
+            return static_cast<unsigned int>(raw);
+        };
+        const unsigned int start = layer("start");
+        const unsigned int end = layer("end");
+        if (start > end)
+            throw AgentError(ErrorCode::InvalidRequest,
+                             "layer_range.start must not exceed layer_range.end");
+        request["layer_range"] = {{"start", start}, {"end", end}};
+    }
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+    require_active_project(params);
+    const auto source = m_jobs.find(params.at("slice_job_id").get<std::string>());
+    if (source == m_jobs.end() || source->second.type != "slice" ||
+        source->second.state != JobState::Succeeded ||
+        source->second.project_id != *m_project_id ||
+        source->second.source_revision != m_revision)
+        throw AgentError(ErrorCode::InvalidRequest,
+                         "slice_job_id must identify a succeeded slice for this project revision");
+    const std::size_t plate_index =
+        source->second.metadata.at("plate_index").get<std::size_t>();
+    nlohmann::json result =
+        m_facade->render_toolpaths(request, m_screenshot_root, plate_index);
+    result["project_id"] = *m_project_id;
+    result["revision"] = m_revision;
+    result["slice_job_id"] = params.at("slice_job_id");
     return result;
 }
 

@@ -41,6 +41,10 @@ public:
     virtual FacadeJobState arrange_state() const = 0;
     virtual nlohmann::json render_scene(const nlohmann::json& request,
                                         const std::filesystem::path& screenshot_root) = 0;
+    virtual nlohmann::json render_toolpaths(
+        const nlohmann::json& request,
+        const std::filesystem::path& screenshot_root,
+        std::size_t plate_index) = 0;
     virtual nlohmann::json presets_list(const nlohmann::json& request) const = 0;
     virtual nlohmann::json presets_select(const nlohmann::json& request) = 0;
     virtual nlohmann::json settings_describe(const nlohmann::json& request) const = 0;

@@ -13,6 +13,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Agent/AgentProcessTracker.hpp
     GUI/Agent/AgentSlicerFacade.cpp
     GUI/Agent/AgentSlicerFacade.hpp
+    GUI/Agent/AgentToolpathRenderer.cpp
+    GUI/Agent/AgentToolpathRenderer.hpp
     GUI/Agent/RenderArtifactRollback.hpp
     GUI/Agent/SecureFile.cpp
     GUI/Agent/SecureFile.hpp

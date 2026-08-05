@@ -522,6 +522,7 @@ try {
     "object_auto_orient",
     "scene_arrange",
     "scene_render",
+    "toolpath_render",
     "desktop_capture",
     "presets_list",
     "presets_select",
@@ -1077,6 +1078,44 @@ try {
   record("slice completed with print metrics", {
     job_id: sliceJob.job_id,
     print_metrics: sliceJob.result.print_metrics,
+  });
+
+  const toolpaths = await call(client, "toolpath_render", {
+    project_id: project.project_id,
+    expected_revision: project.revision,
+    slice_job_id: sliceJob.job_id,
+    views: ["iso", "top"],
+    width: 512,
+    height: 512,
+  });
+  const expectedExcludedMoves = [
+    "travel", "wipe", "retract", "unretract", "tool_change",
+    "filament_change", "pause", "custom_gcode",
+  ];
+  if (
+    toolpaths.value.slice_job_id !== sliceJob.job_id ||
+    toolpaths.value.plate_index !== plateIndex ||
+    toolpaths.value.images?.length !== 2 ||
+    toolpaths.value.images.some((image) =>
+      image.width !== 512 || image.height !== 512 ||
+      image.mime_type !== "image/png" || image.segment_count <= 0
+    ) ||
+    !equalJson(toolpaths.value.images.map((image) => image.view), ["iso", "top"]) ||
+    !equalJson(toolpaths.value.excluded_move_types, expectedExcludedMoves) ||
+    toolpaths.value.legend?.find((item) =>
+      item.feature === "outer_wall" && item.color === "#FF7D38"
+    ) === undefined ||
+    toolpaths.value.legend?.find((item) =>
+      item.feature === "seam" && item.color === "#E6E6E6"
+    ) === undefined
+  ) {
+    throw new Error(`Invalid toolpath render result: ${JSON.stringify(toolpaths.value)}`);
+  }
+  const toolpathHashes = await savePngs(toolpaths.result, "toolpaths");
+  record("rendered sliced toolpaths", {
+    available_layer_range: toolpaths.value.available_layer_range,
+    rendered_layer_range: toolpaths.value.rendered_layer_range,
+    hashes: toolpathHashes,
   });
 
   await expectValidationFailure(

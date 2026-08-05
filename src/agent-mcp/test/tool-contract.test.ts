@@ -19,6 +19,7 @@ describe("MCP tool schemas", () => {
       "object_auto_orient",
       "scene_arrange",
       "scene_render",
+      "toolpath_render",
       "desktop_capture",
       "presets_list",
       "presets_select",
@@ -179,6 +180,24 @@ describe("MCP tool schemas", () => {
       }).success,
     ).toBe(false);
     expect(
+      toolSchemas.toolpath_render.safeParse({
+        project_id: "project-1",
+        expected_revision: 4,
+        slice_job_id: "job-1",
+        views: ["iso", "top_front"],
+        layer_range: { start: 4, end: 12 },
+      }).success,
+    ).toBe(true);
+    expect(
+      toolSchemas.toolpath_render.safeParse({
+        project_id: "project-1",
+        expected_revision: 4,
+        slice_job_id: "job-1",
+        views: ["top"],
+        layer_range: { start: 12, end: 4 },
+      }).success,
+    ).toBe(false);
+    expect(
       toolSchemas.scene_render.safeParse({
         project_id: "project-1",
         views: ["iso", "iso"],
@@ -282,6 +301,9 @@ describe("MCP tool schemas", () => {
     });
     expect(toBridgeParams("scene_render", { views: ["iso", "top_front"] })).toEqual({
       views: ["iso", "topfront"],
+    });
+    expect(toBridgeParams("toolpath_render", { views: ["top_front", "rear"] })).toEqual({
+      views: ["topfront", "rear"],
     });
     const settings = {
       project_id: "project-1",

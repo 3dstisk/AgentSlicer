@@ -43,6 +43,7 @@ The v1 tool list and order are fixed:
 | `object_auto_orient` | Start native auto-orient for exact object/instance targets, or all printable unlocked instances when targets are omitted. |
 | `scene_arrange` | Start native arrangement and return a job. |
 | `scene_render` | Render 1–6 unique views: `iso`, `top`, `front`, `rear`, `left`, `right`, `bottom`, or `top_front`; dimensions are 64–2048 pixels. |
+| `toolpath_render` | Render 1–6 line-type-colored views of a successful slice, optionally limited to an inclusive zero-based layer range. |
 | `desktop_capture` | Capture the full Orca desktop for diagnostics, including dialogs. |
 | `presets_list` | List exact printer/process/filament names, selection, and compatibility. |
 | `presets_select` | Atomically select exact names; filament names are ordered by extruder. |
@@ -114,6 +115,8 @@ project IDs. Every mutating request requires both `project_id` and
 revision they observed. `presets_list`, `settings_describe`, `settings_get`,
 `scene_render`, and `desktop_capture` accept an optional `expected_revision`;
 `scene_get` takes only `project_id`.
+`toolpath_render` requires `expected_revision` because it is bound to a
+successful slice from that exact revision.
 
 `desktop_capture` validates the requested project state both before and after
 its potentially slow capture. Any project ID or revision drift during capture,
@@ -232,8 +235,37 @@ written to a private staging file and published atomically.
 
 `scene_render` returns structured image metadata plus one `image/png` MCP content
 item per requested view, in request order. It always returns the public
-`top_front` vocabulary (never the native `topfront` spelling). `desktop_capture` returns one
-diagnostic PNG. Returned paths are internal identifiers, not HTTP URLs; no
+`top_front` vocabulary (never the native `topfront` spelling).
+
+`toolpath_render` requires a successful `slice_job_id` from the current project
+revision and returns the same inline PNG view vocabulary. It renders all
+available layers unless `layer_range: {start,end}` selects an inclusive
+zero-based range. The result reports the available and rendered ranges, segment
+and seam counts, and this exact Orca line-type legend on a `#202124` background:
+
+| Feature key | Label | Color |
+| --- | --- | --- |
+| `inner_wall` | Inner wall | `#FFE64D` |
+| `outer_wall` | Outer wall | `#FF7D38` |
+| `overhang_wall` | Overhang wall | `#1F1FFF` |
+| `sparse_infill` | Sparse infill | `#B03029` |
+| `internal_solid_infill` | Internal solid infill | `#9654CC` |
+| `top_surface` | Top surface | `#F04040` |
+| `bridge` | Bridge | `#4D80BA` |
+| `gap_infill` | Gap infill | `#FFFFFF` |
+| `custom` | Custom extrusion | `#5ED194` |
+| `bottom_surface` | Bottom surface | `#665CC7` |
+| `internal_bridge` | Internal bridge | `#4D80BA` |
+| `brim` | Brim | `#003B6E` |
+| `seam` | Seam marker | `#E6E6E6` |
+
+Travel, wipe, retract, unretract, tool change, filament change, pause, and
+custom-G-code motions are always excluded. This visibility set matches the
+enabled features in the reference Line Type view; it does not render model
+geometry.
+
+`desktop_capture` returns one diagnostic PNG. Returned paths are internal
+identifiers, not HTTP URLs; no
 `/screenshots` route is published. Image files must be direct children of approved screenshot
 roots. The adapter retains the root descriptor, opens the final file with
 no-symlink semantics, validates and reads through that same descriptor, verifies

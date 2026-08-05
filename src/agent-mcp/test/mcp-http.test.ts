@@ -15,6 +15,25 @@ import { toolNames, type ToolDependencies } from "../src/tool-contract.js";
 import { pngFixture } from "./png-fixture.js";
 
 const PNG = pngFixture(256, 256);
+const TOOLPATH_LEGEND = [
+  ["inner_wall", "Inner wall", "#FFE64D", "extrusion"],
+  ["outer_wall", "Outer wall", "#FF7D38", "extrusion"],
+  ["overhang_wall", "Overhang wall", "#1F1FFF", "extrusion"],
+  ["sparse_infill", "Sparse infill", "#B03029", "extrusion"],
+  ["internal_solid_infill", "Internal solid infill", "#9654CC", "extrusion"],
+  ["top_surface", "Top surface", "#F04040", "extrusion"],
+  ["bridge", "Bridge", "#4D80BA", "extrusion"],
+  ["gap_infill", "Gap infill", "#FFFFFF", "extrusion"],
+  ["custom", "Custom", "#5ED194", "extrusion"],
+  ["bottom_surface", "Bottom surface", "#665CC7", "extrusion"],
+  ["internal_bridge", "Internal bridge", "#4D80BA", "extrusion"],
+  ["brim", "Brim", "#003B6E", "extrusion"],
+  ["seam", "Seam", "#E6E6E6", "marker"],
+].map(([feature, label, color, kind]) => ({ feature, label, color, kind }));
+const EXCLUDED_TOOLPATH_MOVES = [
+  "travel", "wipe", "retract", "unretract", "tool_change",
+  "filament_change", "pause", "custom_gcode",
+];
 const cleanups: Array<() => Promise<void>> = [];
 
 afterEach(async () => {
@@ -96,6 +115,33 @@ async function startMcp(options: {
                 : options.renderMetadataDimensions?.height ?? 256,
               mime_type: "image/png",
               bytes: renderPngs[index]!.length,
+            })),
+          };
+        }
+        if (method === "toolpath_render") {
+          await options.beforeSceneRenderResponse?.(renderPaths);
+          return {
+            project_id: "project-1",
+            revision: 2,
+            slice_job_id: "job-slice",
+            plate_index: 0,
+            available_layer_range: { start: 0, end: 120 },
+            rendered_layer_range: params.layer_range ?? { start: 0, end: 120 },
+            legend: TOOLPATH_LEGEND,
+            excluded_move_types: EXCLUDED_TOOLPATH_MOVES,
+            images: renderViews.map((view, index) => ({
+              path: renderPaths[index],
+              view,
+              width: typeof options.renderMetadataDimensions === "function"
+                ? options.renderMetadataDimensions(index).width
+                : options.renderMetadataDimensions?.width ?? 256,
+              height: typeof options.renderMetadataDimensions === "function"
+                ? options.renderMetadataDimensions(index).height
+                : options.renderMetadataDimensions?.height ?? 256,
+              mime_type: "image/png",
+              bytes: renderPngs[index]!.length,
+              segment_count: 1234,
+              seam_count: 56,
             })),
           };
         }
@@ -535,6 +581,9 @@ describe("Streamable HTTP MCP server", () => {
       listed.tools.find((tool) => tool.name === "scene_render")?.description,
     ).toContain("inline MCP image content");
     expect(
+      listed.tools.find((tool) => tool.name === "toolpath_render")?.description,
+    ).toContain("excludes travel");
+    expect(
       listed.tools.find((tool) => tool.name === "desktop_capture")?.description,
     ).toContain("not an HTTP URL");
 
@@ -718,6 +767,62 @@ describe("Streamable HTTP MCP server", () => {
       data: PNG.toString("base64"),
       mimeType: "image/png",
     });
+    await expect(access(renderPaths[0]!)).rejects.toThrow();
+  });
+
+  it("returns sliced toolpaths with Orca feature colors and excluded motions", async () => {
+    const { client, calls, renderPaths } = await startMcp({ renderViews: ["topfront"] });
+    const rendered = await client.callTool({
+      name: "toolpath_render",
+      arguments: {
+        project_id: "project-1",
+        expected_revision: 2,
+        slice_job_id: "job-slice",
+        views: ["top_front"],
+        width: 256,
+        height: 256,
+        layer_range: { start: 10, end: 20 },
+      },
+    });
+
+    expect(rendered.isError).not.toBe(true);
+    expect(rendered.structuredContent).toMatchObject({
+      project_id: "project-1",
+      revision: 2,
+      slice_job_id: "job-slice",
+      plate_index: 0,
+      available_layer_range: { start: 0, end: 120 },
+      rendered_layer_range: { start: 10, end: 20 },
+      legend: expect.arrayContaining([
+        { feature: "outer_wall", label: "Outer wall", color: "#FF7D38", kind: "extrusion" },
+        { feature: "seam", label: "Seam", color: "#E6E6E6", kind: "marker" },
+      ]),
+      excluded_move_types: EXCLUDED_TOOLPATH_MOVES,
+      images: [{
+        view: "top_front",
+        width: 256,
+        height: 256,
+        segment_count: 1234,
+        seam_count: 56,
+      }],
+    });
+    expect(rendered.content).toContainEqual({
+      type: "image",
+      data: PNG.toString("base64"),
+      mimeType: "image/png",
+    });
+    expect(calls).toContainEqual([
+      "toolpath_render",
+      {
+        project_id: "project-1",
+        expected_revision: 2,
+        slice_job_id: "job-slice",
+        views: ["topfront"],
+        width: 256,
+        height: 256,
+        layer_range: { start: 10, end: 20 },
+      },
+    ]);
     await expect(access(renderPaths[0]!)).rejects.toThrow();
   });
 

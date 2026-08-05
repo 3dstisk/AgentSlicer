@@ -6,8 +6,10 @@
 #include "slic3r/GUI/Agent/AgentProtocol.hpp"
 #include "slic3r/GUI/Agent/AgentProcessTracker.hpp"
 #include "slic3r/GUI/Agent/AgentSettingValidation.hpp"
+#include "slic3r/GUI/Agent/AgentToolpathRenderer.hpp"
 #include "slic3r/GUI/Agent/RenderArtifactRollback.hpp"
 #include "slic3r/GUI/Agent/SecureFile.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 
 #include <algorithm>
 #include <array>
@@ -123,6 +125,24 @@ public:
         last_render = request;
         render_root = root;
         return {{"images", {{{"view", request["views"][0]}, {"path", (root / "fake.png").string()}}}}};
+    }
+    nlohmann::json render_toolpaths(const nlohmann::json& request,
+                                    const std::filesystem::path& root,
+                                    std::size_t plate_index) override
+    {
+        last_toolpath_render = request;
+        render_root = root;
+        rendered_plate_index = plate_index;
+        return {
+            {"plate_index", plate_index},
+            {"available_layer_range", {{"start", 0}, {"end", 20}}},
+            {"rendered_layer_range", request.value(
+                "layer_range", nlohmann::json {{"start", 0}, {"end", 20}})},
+            {"legend", nlohmann::json::array()},
+            {"excluded_move_types", {"travel", "wipe"}},
+            {"images", {{{"view", request["views"][0]},
+                           {"path", (root / "toolpath.png").string()}}}}
+        };
     }
     nlohmann::json presets_list(const nlohmann::json& request) const override
     {
@@ -258,6 +278,8 @@ public:
     std::string auto_orient_owned_fingerprint;
     FacadeJobState next_auto_orient_state;
     nlohmann::json last_render;
+    nlohmann::json last_toolpath_render;
+    std::optional<std::size_t> rendered_plate_index;
     mutable nlohmann::json last_presets_list;
     nlohmann::json last_presets_select;
     mutable nlohmann::json last_settings_describe;
@@ -1315,6 +1337,97 @@ TEST_CASE("Scene render validates views and dimensions before calling native fac
     REQUIRE_THROWS_AS(
         controller.handle({"bad-view", "scene_render",
                            {{"project_id", project["project_id"]}, {"views", {"diagonal"}}}}),
+        AgentError);
+}
+
+TEST_CASE("Toolpath rasterizer includes feature lines and seams but excludes motions",
+          "[AgentBridge]")
+{
+    Slic3r::GCodeProcessorResult gcode;
+    const auto move = [](Slic3r::EMoveType type, Slic3r::ExtrusionRole role,
+                         const Slic3r::Vec3f& position) {
+        Slic3r::GCodeProcessorResult::MoveVertex vertex;
+        vertex.type = type;
+        vertex.extrusion_role = role;
+        vertex.position = position;
+        vertex.layer_id = 1;
+        vertex.width = 0.4f;
+        return vertex;
+    };
+    gcode.moves = {
+        move(Slic3r::EMoveType::Travel, Slic3r::erNone,
+             Slic3r::Vec3f(0.0f, 0.0f, 0.2f)),
+        move(Slic3r::EMoveType::Extrude, Slic3r::erExternalPerimeter,
+             Slic3r::Vec3f(10.0f, 0.0f, 0.2f)),
+        move(Slic3r::EMoveType::Travel, Slic3r::erNone,
+             Slic3r::Vec3f(10.0f, 10.0f, 0.2f)),
+        move(Slic3r::EMoveType::Retract, Slic3r::erNone,
+             Slic3r::Vec3f(10.0f, 10.0f, 0.2f)),
+        move(Slic3r::EMoveType::Seam, Slic3r::erNone,
+             Slic3r::Vec3f(10.0f, 0.0f, 0.2f))
+    };
+
+    const ToolpathRenderResult rendered = render_toolpaths(
+        gcode, {128, 128, "top", std::nullopt});
+    REQUIRE(rendered.image.width == 128);
+    REQUIRE(rendered.image.height == 128);
+    REQUIRE(rendered.image.pixels.size() == 128u * 128u * 4u);
+    REQUIRE(rendered.segment_count == 1);
+    REQUIRE(rendered.seam_count == 1);
+    REQUIRE(rendered.available_layers.start == 0);
+    REQUIRE(rendered.available_layers.end == 0);
+
+    const auto contains_rgb = [&rendered](std::array<unsigned char, 3> rgb) {
+        for (std::size_t offset = 0; offset < rendered.image.pixels.size(); offset += 4) {
+            if (rendered.image.pixels[offset] == rgb[0] &&
+                rendered.image.pixels[offset + 1] == rgb[1] &&
+                rendered.image.pixels[offset + 2] == rgb[2])
+                return true;
+        }
+        return false;
+    };
+    REQUIRE(contains_rgb({255, 125, 56}));
+    REQUIRE(contains_rgb({230, 230, 230}));
+    REQUIRE_FALSE(contains_rgb({56, 72, 155}));
+}
+
+TEST_CASE("Toolpath render requires a successful current-revision slice", "[AgentBridge]")
+{
+    auto facade = std::make_shared<FakeFacade>();
+    AgentController controller(facade, "/workspace", "/screenshots");
+    const auto project = controller.handle({"create", "project_create", {}});
+    facade->next_slice_state =
+        {true, false, 1.0,
+         {{"sliced", true}, {"print_metrics", print_metrics_fixture()}}, nullptr};
+    const auto slice = controller.handle(
+        {"slice", "slice_start",
+         {{"project_id", project["project_id"]},
+          {"expected_revision", project["revision"]}, {"plate_index", 2}}});
+    const auto completed = controller.handle(
+        {"poll", "job_get", {{"job_id", slice["job_id"]}}});
+    REQUIRE(completed["state"] == "succeeded");
+
+    const auto rendered = controller.handle(
+        {"toolpaths", "toolpath_render",
+         {{"project_id", project["project_id"]},
+          {"expected_revision", project["revision"]},
+          {"slice_job_id", slice["job_id"]},
+          {"views", {"topfront"}}, {"width", 800}, {"height", 600},
+          {"layer_range", {{"start", 4}, {"end", 8}}}}});
+    REQUIRE(rendered["slice_job_id"] == slice["job_id"]);
+    REQUIRE(rendered["plate_index"] == 2);
+    REQUIRE(facade->rendered_plate_index == 2);
+    REQUIRE(facade->last_toolpath_render["width"] == 800);
+    REQUIRE(facade->last_toolpath_render["layer_range"]["start"] == 4);
+    REQUIRE(facade->render_root == "/screenshots");
+
+    REQUIRE_THROWS_AS(
+        controller.handle(
+            {"bad-range", "toolpath_render",
+             {{"project_id", project["project_id"]},
+              {"expected_revision", project["revision"]},
+              {"slice_job_id", slice["job_id"]}, {"views", {"top"}},
+              {"layer_range", {{"start", 9}, {"end", 8}}}}}),
         AgentError);
 }
 

@@ -104,6 +104,7 @@ private:
     nlohmann::json auto_orient_objects(const nlohmann::json& params);
     nlohmann::json arrange_scene(const nlohmann::json& params);
     nlohmann::json render_scene(const nlohmann::json& params);
+    nlohmann::json render_toolpaths(const nlohmann::json& params);
     nlohmann::json desktop_capture(const nlohmann::json& params) const;
     nlohmann::json list_presets(const nlohmann::json& params) const;
     nlohmann::json select_presets(const nlohmann::json& params);
