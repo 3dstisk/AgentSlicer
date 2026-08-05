@@ -290,6 +290,8 @@ nlohmann::json AgentController::handle_prepared(const PreparedRequest& prepared)
             return get_scene(request.params);
         if (request.method == "object_transform")
             return transform_object(request.params);
+        if (request.method == "object_auto_orient")
+            return auto_orient_objects(request.params);
         if (request.method == "scene_arrange")
             return arrange_scene(request.params);
         if (request.method == "scene_render")
@@ -336,16 +338,18 @@ void AgentController::synchronize_native_state(std::uint64_t revision_before_ref
         configuration != m_native_configuration_fingerprint;
     if (!scene_changed && !configuration_changed)
         return;
-    const bool arrange_running = std::any_of(
+    const auto attributed_job = std::find_if(
         m_jobs.begin(), m_jobs.end(), [](const auto& entry) {
-            return entry.second.type == "arrange" &&
+            return (entry.second.type == "arrange" ||
+                    entry.second.type == "auto_orient") &&
                 entry.second.facade_managed && !is_terminal(entry.second.state);
         });
-    if (arrange_running && scene_changed && !configuration_changed) {
-        const FacadeJobState arrange = m_facade->arrange_state();
+    if (attributed_job != m_jobs.end() && scene_changed && !configuration_changed) {
+        const FacadeJobState native = attributed_job->second.type == "arrange" ?
+            m_facade->arrange_state() : m_facade->auto_orient_state();
         const std::string attributed_fingerprint =
-            arrange.complete && arrange.result.is_object() ?
-                arrange.result.value("scene_fingerprint", std::string()) : std::string();
+            native.complete && native.result.is_object() ?
+                native.result.value("scene_fingerprint", std::string()) : std::string();
         if (!attributed_fingerprint.empty() && attributed_fingerprint == fingerprint) {
             m_native_fingerprint = fingerprint;
             return;
@@ -381,12 +385,13 @@ void AgentController::record_native_state()
     const std::string fingerprint = m_facade->state_fingerprint();
     const std::string configuration = m_facade->configuration_fingerprint();
     std::lock_guard<std::mutex> lock(m_mutex);
-    const bool arrange_running = std::any_of(
+    const bool attributed_job_running = std::any_of(
         m_jobs.begin(), m_jobs.end(), [](const auto& entry) {
-            return entry.second.type == "arrange" &&
+            return (entry.second.type == "arrange" ||
+                    entry.second.type == "auto_orient") &&
                 entry.second.facade_managed && !is_terminal(entry.second.state);
         });
-    if (arrange_running)
+    if (attributed_job_running)
         return;
     m_native_fingerprint = fingerprint;
     m_native_configuration_fingerprint = configuration;
@@ -402,6 +407,8 @@ void AgentController::refresh_jobs()
         FacadeJobState native;
         if (job.type == "arrange")
             native = m_facade->arrange_state();
+        else if (job.type == "auto_orient")
+            native = m_facade->auto_orient_state();
         else if (job.type == "model_import")
             native = m_facade->model_import_state(
                 !job.invalidated && m_project_id &&
@@ -449,7 +456,10 @@ void AgentController::refresh_jobs()
         } else {
             job.progress = 1.0;
             job.result = native.result;
-            if (job.type == "arrange" || job.type == "model_import")
+            if (job.type == "auto_orient" && job.result.is_object())
+                job.result.erase("scene_fingerprint");
+            if (job.type == "arrange" || job.type == "auto_orient" ||
+                job.type == "model_import")
                 ++m_revision;
             if (job.type == "model_import") {
                 job.result["project_id"] = job.project_id;
@@ -611,7 +621,7 @@ nlohmann::json AgentController::status() const
         {"revision", m_revision},
         {"job_count", m_jobs.size()},
         {"capabilities", {"project_foundation", "model_import", "scene_inspection",
-                          "object_transform", "scene_arrange", "scene_render",
+                          "object_transform", "object_auto_orient", "scene_arrange", "scene_render",
                           "desktop_capture", "preset_control", "settings_control",
                           "job_registry", "slice", "gcode_export", "project_save"}}
     };
@@ -713,6 +723,52 @@ nlohmann::json AgentController::transform_object(const nlohmann::json& params)
     m_facade->transform_object(params);
     ++m_revision;
     return {{"project_id", *m_project_id}, {"revision", m_revision}};
+}
+
+nlohmann::json AgentController::auto_orient_objects(const nlohmann::json& params)
+{
+    if (!params.contains("expected_revision"))
+        throw AgentError(ErrorCode::InvalidRequest, "expected_revision is required");
+    if (params.contains("targets")) {
+        const nlohmann::json& targets = params.at("targets");
+        if (!targets.is_array() || targets.empty() || targets.size() > 1024)
+            throw AgentError(ErrorCode::InvalidRequest,
+                             "targets must contain between one and 1024 entries");
+        std::set<std::pair<std::string, std::string>> unique_targets;
+        for (const nlohmann::json& target : targets) {
+            if (!target.is_object() || target.size() != 2 ||
+                !target.contains("object_id") || !target.at("object_id").is_string() ||
+                !target.contains("instance_id") || !target.at("instance_id").is_string())
+                throw AgentError(ErrorCode::InvalidRequest,
+                                 "Each target must contain object_id and instance_id strings");
+            const auto identity = std::make_pair(
+                target.at("object_id").get<std::string>(),
+                target.at("instance_id").get<std::string>());
+            if (!unique_targets.insert(identity).second)
+                throw AgentError(ErrorCode::InvalidRequest,
+                                 "Auto-orient targets must be unique");
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+    require_active_project(params);
+    require_no_active_mutation("Another mutating job is active");
+    const std::string id = make_opaque_id("job");
+    const nlohmann::json native_metadata = m_facade->job_metadata();
+    nlohmann::json config_snapshot =
+        job_config_snapshot(native_metadata, m_revision);
+    m_facade->start_auto_orient(params);
+    m_native_fingerprint = m_facade->state_fingerprint();
+    Job job;
+    job.id = id;
+    job.type = "auto_orient";
+    job.state = JobState::Running;
+    job.facade_managed = true;
+    job.project_id = *m_project_id;
+    job.source_revision = m_revision;
+    job.metadata = {{"config_snapshot", std::move(config_snapshot)}};
+    m_jobs.emplace(id, std::move(job));
+    return {{"job_id", id}, {"state", job_state_name(m_jobs.at(id).state)}};
 }
 
 nlohmann::json AgentController::arrange_scene(const nlohmann::json& params)

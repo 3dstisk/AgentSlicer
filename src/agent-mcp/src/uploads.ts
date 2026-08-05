@@ -4,7 +4,7 @@ import { link, lstat, mkdir, open, realpath, unlink } from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
 import { extname, isAbsolute, join, relative } from "node:path";
 
-const supportedExtensions = new Set([".stl", ".obj", ".3mf"]);
+const supportedExtensions = new Set([".stl", ".obj", ".3mf", ".step", ".stp"]);
 const uploadIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 export interface UploadPrepareInput {
@@ -272,7 +272,7 @@ export class UploadManager implements UploadPreparer {
       throw new UploadError(
         "invalid_filename",
         400,
-        "filename must be a root-level STL, OBJ, or 3MF filename",
+        "filename must be a root-level STL, OBJ, 3MF, STEP, or STP filename",
       );
     }
     if (!Number.isSafeInteger(input.bytes) || input.bytes <= 0) {

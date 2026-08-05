@@ -101,6 +101,7 @@ private:
                                 std::shared_ptr<std::atomic<bool>> request_abandoned);
     nlohmann::json get_scene(const nlohmann::json& params) const;
     nlohmann::json transform_object(const nlohmann::json& params);
+    nlohmann::json auto_orient_objects(const nlohmann::json& params);
     nlohmann::json arrange_scene(const nlohmann::json& params);
     nlohmann::json render_scene(const nlohmann::json& params);
     nlohmann::json desktop_capture(const nlohmann::json& params) const;

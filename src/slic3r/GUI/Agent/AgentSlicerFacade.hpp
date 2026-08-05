@@ -35,6 +35,8 @@ public:
     virtual FacadeJobState model_import_state(bool allow_commit) = 0;
     virtual nlohmann::json scene() const = 0;
     virtual void transform_object(const nlohmann::json& transform) = 0;
+    virtual void start_auto_orient(const nlohmann::json& request) = 0;
+    virtual FacadeJobState auto_orient_state() const = 0;
     virtual void start_arrange() = 0;
     virtual FacadeJobState arrange_state() const = 0;
     virtual nlohmann::json render_scene(const nlohmann::json& request,

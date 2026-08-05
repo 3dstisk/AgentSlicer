@@ -324,6 +324,13 @@ Model Model::read_from_file(const std::string&                                  
         //FIXME options & LoadStrategy::CheckVersion ?
         //BBS: is_xxx is used for is_bbs_3mf when load 3mf
         result = load_bbs_3mf(input_file.c_str(), config, config_substitutions, &model, plate_data, project_presets, is_xxx, nullptr, file_version, proFn, options, project, plate_id);
+    else if (boost::algorithm::iends_with(input_file, ".step") ||
+             boost::algorithm::iends_with(input_file, ".stp")) {
+        model = read_from_step(input_file, LoadStrategy::Default,
+                               nullptr, nullptr, nullptr,
+                               0.003, 0.5, false);
+        result = true;
+    }
 #ifdef __APPLE__
     else if (boost::algorithm::iends_with(input_file, ".usd") || boost::algorithm::iends_with(input_file, ".usda") ||
              boost::algorithm::iends_with(input_file, ".usdc") || boost::algorithm::iends_with(input_file, ".usdz") ||
@@ -337,7 +344,7 @@ Model Model::read_from_file(const std::string&                                  
     }
 #endif
     else
-        throw Slic3r::RuntimeError(_L("Unknown file format: input file must have .stl, .obj, or .amf(.xml) extension."));
+        throw Slic3r::RuntimeError(_L("Unknown file format: supported extensions include .stl, .obj, .amf, .3mf, .step, and .stp."));
 
     if (is_cb_cancel) {
         Model empty_model;

@@ -1,6 +1,11 @@
 #ifndef ORIENTJOB_HPP
 #define ORIENTJOB_HPP
 
+#include <functional>
+#include <string>
+#include <utility>
+#include <vector>
+
 #include "Job.hpp"
 #include "libslic3r/Orient.hpp"
 
@@ -33,12 +38,18 @@ class OrientJob : public Job
     //BBS:prepare the items from current selected partplate
     void prepare_partplate();
 
+    void prepare_agent_targets();
+
 public:
+    using Target = std::pair<std::size_t, std::size_t>;
+    using CompletionCallback = std::function<void(bool failed, std::string error)>;
+
     void prepare();
     
     void process(Ctl &ctl) override;
 
     OrientJob();
+    OrientJob(std::vector<Target> targets, CompletionCallback completion);
     
     void finalize(bool canceled, std::exception_ptr &e) override;
 #if 0
@@ -57,6 +68,11 @@ public:
     }
 #endif
     static orientation::OrientMesh get_orient_mesh(ModelInstance* instance);
+
+private:
+    bool               m_agent_mode {false};
+    std::vector<Target> m_agent_targets;
+    CompletionCallback m_completion;
 };
 
 

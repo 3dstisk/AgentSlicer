@@ -18248,6 +18248,19 @@ bool Plater::arrange_for_agent(std::function<void(bool failed, std::string error
     return replace_job(worker, std::make_unique<ArrangeJob>(true, std::move(completion)));
 }
 
+bool Plater::orient_for_agent(
+    std::vector<std::pair<std::size_t, std::size_t>> targets,
+    std::function<void(bool failed, std::string error)> completion)
+{
+    auto& worker = get_ui_job_worker();
+    if (!worker.is_idle() || p->model.objects.empty())
+        return false;
+    p->take_snapshot(_u8L("Orient"));
+    return replace_job(
+        worker,
+        std::make_unique<OrientJob>(std::move(targets), std::move(completion)));
+}
+
 bool Plater::slice_for_agent(std::optional<std::size_t> plate_index)
 {
     if (plate_index) {

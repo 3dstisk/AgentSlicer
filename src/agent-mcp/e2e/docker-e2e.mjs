@@ -499,6 +499,7 @@ try {
     "model_import",
     "scene_get",
     "object_transform",
+    "object_auto_orient",
     "scene_arrange",
     "scene_render",
     "desktop_capture",
@@ -754,6 +755,47 @@ try {
     throw new Error("Scene render did not change after the object transform");
   }
   record("transformed model and enforced optimistic revision");
+
+  const orientSource = { ...project };
+  const orientStart = (
+    await call(client, "object_auto_orient", {
+      project_id: orientSource.project_id,
+      expected_revision: orientSource.revision,
+      targets: [{
+        object_id: scene.objects[0].object_id,
+        instance_id: transformed.instance_id,
+      }],
+    })
+  ).value;
+  const orientJob = await waitForJob(client, orientStart.job_id);
+  if (
+    orientJob.type !== "auto_orient" ||
+    orientJob.state !== "succeeded" ||
+    orientJob.progress !== 1 ||
+    orientJob.project_id !== orientSource.project_id ||
+    orientJob.source_revision !== orientSource.revision ||
+    orientJob.revision !== orientSource.revision + 1 ||
+    orientJob.result?.oriented !== true ||
+    !Array.isArray(orientJob.warnings) ||
+    orientJob.error !== null
+  ) {
+    throw new Error(`Invalid completed auto-orient job: ${JSON.stringify(orientJob)}`);
+  }
+  project = {
+    project_id: orientSource.project_id,
+    revision: orientJob.revision,
+  };
+  scene = (
+    await call(client, "scene_get", { project_id: project.project_id })
+  ).value;
+  if (scene.revision !== project.revision) {
+    throw new Error(`Scene did not refresh to auto-oriented revision: ${JSON.stringify(scene)}`);
+  }
+  record("auto-oriented the transformed instance", {
+    job_id: orientJob.job_id,
+    source_revision: orientJob.source_revision,
+    revision: orientJob.revision,
+  });
 
   const arrangePresets = (
     await call(client, "presets_list", {

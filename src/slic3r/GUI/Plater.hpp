@@ -3,6 +3,7 @@
 
 #include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 #include <boost/filesystem/path.hpp>
 
@@ -642,6 +643,9 @@ public:
 
     void arrange();
     bool arrange_for_agent(std::function<void(bool failed, std::string error)> completion);
+    bool orient_for_agent(
+        std::vector<std::pair<std::size_t, std::size_t>> targets,
+        std::function<void(bool failed, std::string error)> completion);
     bool slice_for_agent(std::optional<std::size_t> plate_index);
     bool export_gcode_for_agent(const boost::filesystem::path& output_path,
                                 std::size_t plate_index);

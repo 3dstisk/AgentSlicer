@@ -7,6 +7,8 @@
 #include "slic3r/GUI/NotificationManager.hpp"
 #include "libslic3r/PresetBundle.hpp"
 
+#include <set>
+#include <stdexcept>
 
 namespace Slic3r { namespace GUI {
 
@@ -134,9 +136,63 @@ void OrientJob::prepare_partplate() {
     prepare_selection(obj_sel, true);
 }
 
+void OrientJob::prepare_agent_targets()
+{
+    clear_input();
+
+    Model& model = m_plater->model();
+    PartPlateList& plate_list = m_plater->get_partplate_list();
+    const std::set<Target> targets(m_agent_targets.begin(), m_agent_targets.end());
+    const bool orient_all = targets.empty();
+    std::size_t matched_targets = 0;
+
+    for (std::size_t object_index = 0; object_index < model.objects.size(); ++object_index) {
+        ModelObject* object = model.objects[object_index];
+        for (std::size_t instance_index = 0;
+             instance_index < object->instances.size(); ++instance_index) {
+            ModelInstance* instance = object->instances[instance_index];
+            const Target target {object_index, instance_index};
+            const bool selected = orient_all || targets.count(target) != 0;
+            if (selected && !orient_all)
+                ++matched_targets;
+
+            const int plate_index = plate_list.find_instance(
+                static_cast<int>(object_index), static_cast<int>(instance_index));
+            const bool locked = plate_index >= 0 &&
+                plate_index < plate_list.get_plate_count() &&
+                plate_list.is_locked(plate_index);
+            if (selected && locked) {
+                if (!orient_all)
+                    throw std::runtime_error(
+                        "Cannot auto-orient an instance on a locked plate");
+                continue;
+            }
+            if (!instance->printable) {
+                if (selected && !orient_all)
+                    throw std::runtime_error(
+                        "Cannot auto-orient an unprintable instance");
+                continue;
+            }
+
+            OrientMesh orient_mesh = get_orient_mesh(instance);
+            (selected ? m_selected : m_unselected).emplace_back(
+                std::move(orient_mesh));
+        }
+    }
+
+    if (!orient_all && matched_targets != targets.size())
+        throw std::runtime_error("An auto-orient target no longer exists");
+    if (m_selected.empty())
+        throw std::runtime_error("No printable unlocked instances are available to auto-orient");
+}
+
 //BBS: add partplate logic
 void OrientJob::prepare()
 {
+    if (m_agent_mode) {
+        prepare_agent_targets();
+        return;
+    }
     int state = m_plater->get_prepare_state();
     m_plater->get_notification_manager()->bbl_close_plateinfo_notification();
     if (state == Job::JobPrepareState::PREPARE_STATE_DEFAULT) {
@@ -196,19 +252,44 @@ void OrientJob::process(Ctl &ctl)
 
 OrientJob::OrientJob() : m_plater{wxGetApp().plater()} {}
 
+OrientJob::OrientJob(std::vector<Target> targets, CompletionCallback completion)
+    : OrientJob()
+{
+    m_agent_mode = true;
+    m_agent_targets = std::move(targets);
+    m_completion = std::move(completion);
+}
+
 void OrientJob::finalize(bool canceled, std::exception_ptr &eptr)
 {
+    bool failed = canceled;
+    std::string failure_message = canceled ? "Auto-orient was cancelled" : std::string();
     try {
         if (eptr)
             std::rethrow_exception(eptr);
         eptr = nullptr;
+    } catch (const std::exception& error) {
+        failed = true;
+        failure_message = error.what();
+        if (m_agent_mode)
+            eptr = nullptr;
+        else
+            eptr = std::current_exception();
     } catch (...) {
-        eptr = std::current_exception();
+        failed = true;
+        failure_message = "Unknown auto-orient error";
+        if (m_agent_mode)
+            eptr = nullptr;
+        else
+            eptr = std::current_exception();
     }
 
-    // Ignore the arrange result if aborted.
-    if (canceled || eptr)
+    // Ignore the orientation result if aborted.
+    if (failed || eptr) {
+        if (m_completion)
+            m_completion(true, std::move(failure_message));
         return;
+    }
 
     for (OrientMesh& mesh : m_selected)
     {
@@ -217,6 +298,9 @@ void OrientJob::finalize(bool canceled, std::exception_ptr &eptr)
 
 
     m_plater->update();
+
+    if (m_completion)
+        m_completion(false, {});
 
     // BBS
     //wxGetApp().obj_manipul()->set_dirty();

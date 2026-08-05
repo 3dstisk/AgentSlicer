@@ -141,7 +141,7 @@ async function startMcp(options: {
         if (method === "scene_get") {
           return { project_id: "project-1", revision: 2, objects: [], plates: [] };
         }
-        if (method === "scene_arrange") {
+        if (method === "object_auto_orient" || method === "scene_arrange") {
           return { job_id: "job-1", state: "running" };
         }
         if (method === "slice_start" || method === "gcode_export" || method === "project_save") {
@@ -1057,6 +1057,27 @@ describe("Streamable HTTP MCP server", () => {
     ]);
   });
 
+  it("starts native auto-orient for exact instances", async () => {
+    const { client, calls } = await startMcp();
+    const targets = [{ object_id: "object-1", instance_id: "instance-1" }];
+    const started = await client.callTool({
+      name: "object_auto_orient",
+      arguments: {
+        project_id: "project-1",
+        expected_revision: 2,
+        targets,
+      },
+    });
+    expect(started.structuredContent).toEqual({
+      job_id: "job-1",
+      state: "running",
+    });
+    expect(calls).toContainEqual([
+      "object_auto_orient",
+      { project_id: "project-1", expected_revision: 2, targets },
+    ]);
+  });
+
   it("preserves a registered failed model-import startup job", async () => {
     const { client, calls } = await startMcp({
       bridgeCall(method) {
@@ -1315,6 +1336,19 @@ describe("Streamable HTTP MCP server", () => {
         warnings: [],
         metadata: { config_snapshot: snapshot },
         result: { arranged: true },
+        error: null,
+        revision: 5,
+      },
+      "auto-orient-success": {
+        job_id: "auto-orient-success",
+        type: "auto_orient",
+        state: "succeeded",
+        progress: 1,
+        project_id: "project-1",
+        source_revision: 4,
+        warnings: [],
+        metadata: { config_snapshot: snapshot },
+        result: { oriented: true },
         error: null,
         revision: 5,
       },

@@ -783,6 +783,9 @@ public:
         m_arrange_active = false;
         m_arrange_state.reset();
         m_arrange_owned_fingerprint.clear();
+        m_auto_orient_active = false;
+        m_auto_orient_state.reset();
+        m_auto_orient_owned_fingerprint.clear();
     }
 
     void start_model_import(const std::filesystem::path& path) override
@@ -978,6 +981,74 @@ public:
             found_object->invalidate_bounding_box();
         }
         m_plater.changed_object(found_object_index);
+    }
+
+    void start_auto_orient(const nlohmann::json& request) override
+    {
+        assert_gui_thread();
+        Model& model = m_plater.model();
+        std::vector<std::pair<std::size_t, std::size_t>> targets;
+        if (request.contains("targets")) {
+            for (const nlohmann::json& requested : request.at("targets")) {
+                bool found = false;
+                for (std::size_t object_index = 0;
+                     object_index < model.objects.size() && !found; ++object_index) {
+                    ModelObject* object = model.objects[object_index];
+                    if (object_id(*object) != requested.at("object_id").get<std::string>())
+                        continue;
+                    for (std::size_t instance_index = 0;
+                         instance_index < object->instances.size(); ++instance_index) {
+                        if (instance_id(*object->instances[instance_index]) ==
+                            requested.at("instance_id").get<std::string>()) {
+                            targets.emplace_back(object_index, instance_index);
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+                if (!found)
+                    throw AgentError(ErrorCode::ObjectNotFound,
+                                     "Auto-orient target does not exist");
+            }
+        }
+
+        m_auto_orient_state = std::make_shared<FacadeJobState>();
+        std::weak_ptr<FacadeJobState> weak_state = m_auto_orient_state;
+        if (!m_plater.orient_for_agent(
+                std::move(targets),
+                [this, weak_state](bool failed, std::string error) {
+                    if (const auto state = weak_state.lock()) {
+                        if (failed) {
+                            *state = {true, true, 1.0, nullptr,
+                                      {{"message", std::move(error)}}};
+                        } else {
+                            m_auto_orient_owned_fingerprint = state_fingerprint();
+                            *state = {true, false, 1.0,
+                                      {{"oriented", true}}, nullptr};
+                        }
+                    }
+                }))
+            throw AgentError(ErrorCode::MutationInProgress,
+                             "Orca could not queue the auto-orient job");
+        m_auto_orient_active = true;
+    }
+
+    FacadeJobState auto_orient_state() const override
+    {
+        assert_gui_thread();
+        if (!m_auto_orient_active)
+            return {true, true, 1.0, nullptr,
+                    {{"message", "Auto-orient job was not started"}}};
+        if (m_auto_orient_state && !m_auto_orient_state->complete &&
+            !m_plater.get_ui_job_worker().is_idle())
+            return {false, false, 0.5, nullptr, nullptr};
+        if (!m_auto_orient_state || !m_auto_orient_state->complete)
+            return {true, true, 1.0, nullptr,
+                    {{"message", "Auto-orient ended without a completion result"}}};
+        FacadeJobState result = *m_auto_orient_state;
+        if (!result.failed && result.result.is_object())
+            result.result["scene_fingerprint"] = m_auto_orient_owned_fingerprint;
+        return result;
     }
 
     void start_arrange() override
@@ -1693,6 +1764,9 @@ private:
     mutable bool m_import_active {false};
     mutable std::shared_ptr<ImportTask> m_import_task;
     mutable FacadeJobState m_import_state;
+    mutable bool m_auto_orient_active {false};
+    mutable std::shared_ptr<FacadeJobState> m_auto_orient_state;
+    std::string m_auto_orient_owned_fingerprint;
     mutable bool m_arrange_active {false};
     mutable std::shared_ptr<FacadeJobState> m_arrange_state;
     std::string m_arrange_owned_fingerprint;

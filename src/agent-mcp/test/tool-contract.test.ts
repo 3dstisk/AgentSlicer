@@ -16,6 +16,7 @@ describe("MCP tool schemas", () => {
       "model_import",
       "scene_get",
       "object_transform",
+      "object_auto_orient",
       "scene_arrange",
       "scene_render",
       "desktop_capture",
@@ -37,6 +38,13 @@ describe("MCP tool schemas", () => {
       bytes: 123,
       sha256: "a".repeat(64),
     }).success).toBe(true);
+    for (const filename of ["part.step", "part.STP"]) {
+      expect(toolSchemas.upload_prepare.safeParse({
+        filename,
+        bytes: 123,
+        sha256: "a".repeat(64),
+      }).success, filename).toBe(true);
+    }
     for (const filename of ["../part.stl", "nested/part.obj", "part.gcode", ".stl"]) {
       expect(toolSchemas.upload_prepare.safeParse({
         filename,
@@ -71,11 +79,37 @@ describe("MCP tool schemas", () => {
       }).success,
     ).toBe(false);
     expect(
+      toolSchemas.object_auto_orient.safeParse({
+        project_id: "project-1",
+        expected_revision: 4,
+        targets: [{ object_id: "object-1", instance_id: "instance-1" }],
+      }).success,
+    ).toBe(true);
+    expect(
+      toolSchemas.object_auto_orient.safeParse({
+        project_id: "project-1",
+        targets: [{ object_id: "object-1", instance_id: "instance-1" }],
+      }).success,
+    ).toBe(false);
+    expect(
       toolSchemas.scene_arrange.safeParse({
         project_id: "project-1",
         expected_revision: -1,
       }).success,
     ).toBe(false);
+  });
+
+  it("accepts all-instance auto-orient and rejects duplicate exact targets", () => {
+    expect(toolSchemas.object_auto_orient.safeParse({
+      project_id: "project-1",
+      expected_revision: 2,
+    }).success).toBe(true);
+    const target = { object_id: "object-1", instance_id: "instance-1" };
+    expect(toolSchemas.object_auto_orient.safeParse({
+      project_id: "project-1",
+      expected_revision: 2,
+      targets: [target, target],
+    }).success).toBe(false);
   });
 
   it("rejects unknown fields, invalid paths, and no-op transforms", () => {

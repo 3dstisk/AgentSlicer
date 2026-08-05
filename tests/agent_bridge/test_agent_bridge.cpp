@@ -88,6 +88,21 @@ public:
         return {{"objects", {{{"object_id", "object_10"}}}}, {"plates", nlohmann::json::array()}};
     }
     void transform_object(const nlohmann::json& value) override { last_transform = value; }
+    void start_auto_orient(const nlohmann::json& request) override
+    {
+        auto_orient_started = true;
+        last_auto_orient = request;
+        auto_orient_owned_fingerprint = fingerprint;
+        if (on_auto_orient_start)
+            on_auto_orient_start();
+    }
+    FacadeJobState auto_orient_state() const override
+    {
+        FacadeJobState state = next_auto_orient_state;
+        if (state.complete && !state.failed && state.result.is_object())
+            state.result["scene_fingerprint"] = auto_orient_owned_fingerprint;
+        return state;
+    }
     void start_arrange() override
     {
         arrange_started = true;
@@ -237,6 +252,11 @@ public:
     FacadeJobState next_import_state;
     std::filesystem::path render_root;
     nlohmann::json last_transform;
+    bool auto_orient_started {false};
+    nlohmann::json last_auto_orient;
+    std::function<void()> on_auto_orient_start;
+    std::string auto_orient_owned_fingerprint;
+    FacadeJobState next_auto_orient_state;
     nlohmann::json last_render;
     mutable nlohmann::json last_presets_list;
     nlohmann::json last_presets_select;
@@ -522,6 +542,26 @@ TEST_CASE("Import paths stay beneath workspace and revision commits after native
                            {{"project_id", project["project_id"]}, {"expected_revision", 2},
                             {"path", "not-model.txt"}}}),
         AgentError);
+}
+
+TEST_CASE("Import preparation accepts STEP extensions", "[AgentBridge]")
+{
+    TestWorkspace workspace;
+    for (const std::string extension : {".step", ".STP"}) {
+        DYNAMIC_SECTION("Extension " << extension) {
+            const std::string filename = "part" + extension;
+            std::ofstream(workspace.root / filename) << "STEP fixture";
+            TemporaryFile snapshot = snapshot_workspace_import(
+                workspace.root, workspace.root / "imports", filename, 1024);
+            const std::string expected_extension =
+                extension == ".STP" ? ".stp" : extension;
+            REQUIRE(snapshot.path().extension().string() == expected_extension);
+            std::ifstream input(snapshot.path());
+            std::string contents;
+            std::getline(input, contents);
+            REQUIRE(contents == "STEP fixture");
+        }
+    }
 }
 
 TEST_CASE("Import paths enforce the configured file size limit", "[AgentBridge]")
@@ -1014,10 +1054,67 @@ TEST_CASE("Every native scene mutator requires an expected revision", "[AgentBri
          {{"project_id", project["project_id"]}, {"object_id", "object_10"},
           {"instance_id", "instance_11"}, {"offset_mm", {1.0, 0.0, 0.0}}}});
     requires_revision(
+        {"orient", "object_auto_orient",
+         {{"project_id", project["project_id"]},
+          {"targets", {{{"object_id", "object_10"},
+                        {"instance_id", "instance_11"}}}}}});
+    requires_revision(
         {"arrange", "scene_arrange", {{"project_id", project["project_id"]}}});
     REQUIRE_FALSE(facade->import_started);
     REQUIRE(facade->last_transform.is_null());
+    REQUIRE_FALSE(facade->auto_orient_started);
     REQUIRE_FALSE(facade->arrange_started);
+}
+
+TEST_CASE("Auto-orient jobs target instances and increment revision on success",
+          "[AgentBridge]")
+{
+    auto facade = std::make_shared<FakeFacade>();
+    AgentController controller(facade);
+    const auto project = controller.handle({"create", "project_create", {}});
+    const nlohmann::json targets = {
+        {{"object_id", "object_10"}, {"instance_id", "instance_11"}}
+    };
+    const auto started = controller.handle(
+        {"orient", "object_auto_orient",
+         {{"project_id", project["project_id"]},
+          {"expected_revision", project["revision"]},
+          {"targets", targets}}});
+    REQUIRE(facade->auto_orient_started);
+    REQUIRE(facade->last_auto_orient["targets"] == targets);
+
+    facade->next_auto_orient_state = {false, false, 0.5, nullptr, nullptr};
+    REQUIRE(controller.handle(
+        {"poll", "job_get", {{"job_id", started["job_id"]}}})["state"] == "running");
+    facade->next_auto_orient_state =
+        {true, false, 1.0, {{"oriented", true}}, nullptr};
+    const auto complete = controller.handle(
+        {"done", "job_get", {{"job_id", started["job_id"]}}});
+    REQUIRE(complete["type"] == "auto_orient");
+    REQUIRE(complete["state"] == "succeeded");
+    REQUIRE(complete["result"] == nlohmann::json {{"oriented", true}});
+    REQUIRE(complete["revision"] == 2);
+    REQUIRE(complete["source_revision"] == project["revision"]);
+    REQUIRE(complete["metadata"]["config_snapshot"]["revision"] ==
+            project["revision"]);
+}
+
+TEST_CASE("Auto-orient rejects duplicate targets before native startup",
+          "[AgentBridge]")
+{
+    auto facade = std::make_shared<FakeFacade>();
+    AgentController controller(facade);
+    const auto project = controller.handle({"create", "project_create", {}});
+    const nlohmann::json target =
+        {{"object_id", "object_10"}, {"instance_id", "instance_11"}};
+    REQUIRE_THROWS_AS(
+        controller.handle(
+            {"orient", "object_auto_orient",
+             {{"project_id", project["project_id"]},
+              {"expected_revision", project["revision"]},
+              {"targets", {target, target}}}}),
+        AgentError);
+    REQUIRE_FALSE(facade->auto_orient_started);
 }
 
 TEST_CASE("Arrange jobs observe facade completion and increment revision on success", "[AgentBridge]")

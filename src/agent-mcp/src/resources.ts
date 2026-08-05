@@ -7,7 +7,7 @@ export const uploadDocumentationUri = "agentslicer://docs/upload";
 function uploadDocumentation(uploads: UploadPreparer): string {
   return `# Uploading models to AgentSlicer
 
-AgentSlicer imports STL, OBJ, and 3MF files from \`/workspace\`. Local client files must be
+AgentSlicer imports STL, OBJ, 3MF, STEP, and STP files from \`/workspace\`. Local client files must be
 uploaded before calling \`model_import\`.
 
 ## Workflow
@@ -34,7 +34,7 @@ export function registerAgentResources(server: McpServer, uploads: UploadPrepare
     uploadDocumentationUri,
     {
       title: "Uploading models",
-      description: "Authenticated upload workflow for STL, OBJ, and 3MF model files.",
+      description: "Authenticated upload workflow for STL, OBJ, 3MF, STEP, and STP model files.",
       mimeType: "text/markdown",
     },
     async (uri) => ({

@@ -35,11 +35,12 @@ The v1 tool list and order are fixed:
 | Tool | Contract |
 | --- | --- |
 | `slicer_status` | Return readiness, native protocol version, active project/revision, job count, and capabilities. |
-| `upload_prepare` | Create a single-use upload ticket for a named `.stl`, `.obj`, or `.3mf` with an exact byte count and SHA-256. |
+| `upload_prepare` | Create a single-use upload ticket for a named `.stl`, `.obj`, `.3mf`, `.step`, or `.stp` with an exact byte count and SHA-256. |
 | `project_create` | Reset Orca to one empty active project; return `project_id` and new `revision`. |
-| `model_import` | Start import of an `.stl`, `.obj`, or `.3mf` from an absolute `/workspace/...` path and return a job. |
+| `model_import` | Start import of an `.stl`, `.obj`, `.3mf`, `.step`, or `.stp` from an absolute `/workspace/...` path and return a job. |
 | `scene_get` | Return objects, instances, transforms, bounds, plates, and current revision. |
 | `object_transform` | Apply an absolute or relative position/rotation/scale and optional `place_on_bed`. |
+| `object_auto_orient` | Start native auto-orient for exact object/instance targets, or all printable unlocked instances when targets are omitted. |
 | `scene_arrange` | Start native arrangement and return a job. |
 | `scene_render` | Render 1–6 unique views: `iso`, `top`, `front`, `rear`, `left`, `right`, `bottom`, or `top_front`; dimensions are 64–2048 pixels. |
 | `desktop_capture` | Capture the full Orca desktop for diagnostics, including dialogs. |
@@ -78,7 +79,7 @@ Authorization: Bearer <AGENT_SLICER_TOKEN>
 Content-Type: application/octet-stream
 Content-Length: <exact upload_prepare bytes>
 
-<raw STL, OBJ, or 3MF bytes>
+<raw STL, OBJ, 3MF, STEP, or STP bytes>
 ```
 
 Tickets are consumed by the first authenticated `PUT`, including a failed one,
@@ -126,7 +127,7 @@ settings batch is all-or-nothing; `dry_run` does not advance the revision. At
 most one mutating asynchronous job is active, otherwise the operation returns
 `mutation_in_progress`.
 
-`scene_arrange`, `slice_start`, and `gcode_export` return
+`object_auto_orient`, `scene_arrange`, `slice_start`, and `gcode_export` return
 `{job_id, state:"running"}`. `model_import` and `project_save` register the job
 before invoking Orca, so they may instead return `{job_id, state:"failed"}` if
 native startup fails; retain that `job_id` and poll `job_get` for its stable
@@ -153,8 +154,9 @@ the final controller-produced snapshot envelope (including its revision and
 presets) are each bounded to 512 KiB; override arrays are bounded to 4096
 entries, and each serialized value is limited to 64 KiB.
 Settings and `redacted_keys` have no independent count cap: their total bytes
-remain bounded by the snapshot limits. Unsafe values participate only in in-memory hashes. Arrange succeeds with
-`{arranged:true}` and advances the project revision. Model import has empty
+remain bounded by the snapshot limits. Unsafe values participate only in in-memory hashes. Auto-orient succeeds with
+`{oriented:true}`, places its targets on the bed, and advances the project revision.
+Arrange succeeds with `{arranged:true}` and advances the project revision. Model import has empty
 metadata and succeeds with `{project_id,revision,object_ids}` while advancing
 the project revision. Slice metadata adds its
 plate to the same snapshot. G-code export inherits the exact snapshot from its
@@ -259,7 +261,7 @@ upload endpoint uses status-specific JSON errors including `upload_not_found`,
    retain the returned `workspace_path`.
 3. Call `project_create`.
 4. Import the workspace model using the returned project revision.
-5. Inspect with `scene_get`; transform or arrange using the latest revision.
+5. Inspect with `scene_get`; transform, auto-orient, or arrange using the latest revision.
 6. Select presets, discover settings, and apply typed changes.
 7. Start slicing, poll its job, export its G-code, then optionally save the 3MF.
 

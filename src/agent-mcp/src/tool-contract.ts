@@ -258,7 +258,7 @@ export const toolSchemas = {
         .max(255)
         .refine(
           isSupportedUploadFilename,
-          "filename must be a root-level STL, OBJ, or 3MF filename",
+          "filename must be a root-level STL, OBJ, 3MF, STEP, or STP filename",
         ),
       bytes: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
       sha256: z.string().regex(/^[0-9a-f]{64}$/i),
@@ -295,6 +295,30 @@ export const toolSchemas = {
         value.place_on_bed === true,
       { message: "At least one transform field is required" },
     ),
+  object_auto_orient: z
+    .object({
+      ...projectWithRevision,
+      targets: z
+        .array(
+          z
+            .object({
+              object_id: opaqueId,
+              instance_id: opaqueId,
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(1024)
+        .refine(
+          (targets) =>
+            new Set(targets.map(
+              (target) => `${target.object_id}\0${target.instance_id}`,
+            )).size === targets.length,
+          "auto-orient targets must be unique",
+        )
+        .optional(),
+    })
+    .strict(),
   scene_arrange: z.object(projectWithRevision).strict(),
   presets_list: z
     .object({
@@ -430,6 +454,7 @@ export const toolNames = [
   "model_import",
   "scene_get",
   "object_transform",
+  "object_auto_orient",
   "scene_arrange",
   "scene_render",
   "desktop_capture",
@@ -464,12 +489,14 @@ export interface AgentToolDependencies extends ToolDependencies {
 const descriptions: Record<ToolName, string> = {
   slicer_status: "Report native Orca bridge readiness, active project, revision, jobs, and capabilities.",
   upload_prepare:
-    "Create a single-use authenticated HTTP upload ticket for a local STL, OBJ, or 3MF file. PUT the raw bytes to the returned same-origin upload_path, then pass workspace_path to model_import. Detailed guidance is available at agentslicer://docs/upload.",
+    "Create a single-use authenticated HTTP upload ticket for a local STL, OBJ, 3MF, STEP, or STP file. PUT the raw bytes to the returned same-origin upload_path, then pass workspace_path to model_import. Detailed guidance is available at agentslicer://docs/upload.",
   project_create: "Reset Orca to a new empty project and return its opaque project id and revision.",
   model_import:
-    "Import an STL, 3MF, or OBJ model already present beneath /workspace. For local client files, call upload_prepare and complete its HTTP PUT first; see agentslicer://docs/upload.",
+    "Import an STL, OBJ, 3MF, STEP, or STP model already present beneath /workspace. For local client files, call upload_prepare and complete its HTTP PUT first; see agentslicer://docs/upload.",
   scene_get: "Inspect objects, instances, transforms, bounds, plates, and the current revision.",
   object_transform: "Move, rotate, scale, or place one model instance on the bed.",
+  object_auto_orient:
+    "Start Orca's native auto-orient operation for exact object/instance targets, or every printable unlocked instance when targets are omitted. Successful targets are placed on the bed.",
   scene_arrange: "Start Orca's native arrange operation for the active project.",
   scene_render:
     "Render one to six clean PNG views of the active scene as inline MCP image content. Returned paths are internal identifiers, not HTTP URLs.",
@@ -839,6 +866,23 @@ const arrangeJobSchema = z
     result: z.record(z.string(), z.unknown()).nullable(),
   })
   .strict();
+const autoOrientJobSchema = z
+  .object({
+    ...jobBase,
+    type: z.literal("auto_orient"),
+    metadata: z
+      .object({
+        config_snapshot: configSnapshotSchema,
+      })
+      .strict(),
+    result: z
+      .object({
+        oriented: z.literal(true),
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict();
 const modelImportJobSchema = z
   .object({
     ...jobBase,
@@ -920,6 +964,7 @@ const projectSaveJobSchema = z
   });
 export const jobResultSchema = z.discriminatedUnion("type", [
   arrangeJobSchema,
+  autoOrientJobSchema,
   modelImportJobSchema,
   sliceJobSchema,
   gcodeExportJobSchema,
@@ -1309,6 +1354,20 @@ export function registerAgentTools(server: McpServer, dependencies: AgentToolDep
       outputSchema: projectResultSchema,
     },
     (params) => bridgeTool(dependencies, "object_transform", params, projectResultSchema),
+  );
+  server.registerTool(
+    "object_auto_orient",
+    {
+      description: descriptions.object_auto_orient,
+      inputSchema: toolSchemas.object_auto_orient,
+      outputSchema: runningJobStartResultSchema,
+    },
+    (params) => bridgeTool(
+      dependencies,
+      "object_auto_orient",
+      params,
+      runningJobStartResultSchema,
+    ),
   );
   server.registerTool(
     "scene_arrange",

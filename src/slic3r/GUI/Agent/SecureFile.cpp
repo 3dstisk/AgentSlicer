@@ -88,9 +88,10 @@ std::filesystem::path safe_relative_path(const std::filesystem::path& workspace_
     }
 
     const std::string extension = lowercase_extension(path);
-    if (extension != ".stl" && extension != ".obj" && extension != ".3mf")
+    if (extension != ".stl" && extension != ".obj" && extension != ".3mf" &&
+        extension != ".step" && extension != ".stp")
         throw AgentError(ErrorCode::UnsupportedFormat,
-                         "Only STL, OBJ, and 3MF imports are supported");
+                         "Only STL, OBJ, 3MF, STEP, and STP imports are supported");
     return path;
 }
 
