@@ -4,6 +4,7 @@ import { request } from "node:http";
 import type { PoolWorker, WorkerProvisioner } from "./pool.js";
 
 const MAX_DOCKER_RESPONSE_BYTES = 1024 * 1024;
+const MAX_SUPPORTED_DOCKER_API_VERSION = "1.44";
 
 export interface DockerApi {
   request(
@@ -20,24 +21,99 @@ export interface DockerEngineClientOptions {
 }
 
 export class DockerEngineClient implements DockerApi {
-  private readonly apiPrefix: string;
+  private apiPrefix: string | undefined;
+  private apiPrefixPromise: Promise<string> | undefined;
 
   constructor(private readonly options: DockerEngineClientOptions) {
-    this.apiPrefix = `/v${options.apiVersion ?? "1.43"}`;
+    if (options.apiVersion !== undefined) {
+      this.apiPrefix = DockerEngineClient.versionPrefix(options.apiVersion);
+    }
   }
 
-  request(
+  async request(
     method: string,
     path: string,
     body?: unknown,
     acceptedStatuses: readonly number[] = [200],
+  ): Promise<unknown> {
+    const apiPrefix = await this.resolveApiPrefix();
+    return this.requestPath(method, `${apiPrefix}${path}`, body, acceptedStatuses);
+  }
+
+  private async resolveApiPrefix(): Promise<string> {
+    if (this.apiPrefix !== undefined) {
+      return this.apiPrefix;
+    }
+    const pending = this.apiPrefixPromise ??= this.discoverApiPrefix();
+    try {
+      const apiPrefix = await pending;
+      this.apiPrefix = apiPrefix;
+      return apiPrefix;
+    } catch (error) {
+      if (this.apiPrefixPromise === pending) {
+        this.apiPrefixPromise = undefined;
+      }
+      throw error;
+    }
+  }
+
+  private async discoverApiPrefix(): Promise<string> {
+    const version = await this.requestPath("GET", "/version", undefined, [200]);
+    if (typeof version !== "object" || version === null ||
+        !("ApiVersion" in version) || typeof version.ApiVersion !== "string") {
+      throw new Error("Docker Engine returned an unexpected version response");
+    }
+    const minApiVersion = "MinAPIVersion" in version ? version.MinAPIVersion : undefined;
+    if (minApiVersion !== undefined && typeof minApiVersion !== "string") {
+      throw new Error("Docker Engine returned an unexpected version response");
+    }
+    const apiVersion = DockerEngineClient.compareVersions(
+        version.ApiVersion,
+        MAX_SUPPORTED_DOCKER_API_VERSION,
+      ) < 0
+      ? version.ApiVersion
+      : MAX_SUPPORTED_DOCKER_API_VERSION;
+    if (minApiVersion !== undefined &&
+        DockerEngineClient.compareVersions(apiVersion, minApiVersion) < 0) {
+      throw new Error(
+        `Docker Engine requires API ${minApiVersion} or newer, ` +
+        `but AgentSlicer supports up to API ${MAX_SUPPORTED_DOCKER_API_VERSION}`,
+      );
+    }
+    return DockerEngineClient.versionPrefix(apiVersion);
+  }
+
+  private static versionPrefix(apiVersion: string): string {
+    DockerEngineClient.versionParts(apiVersion);
+    return `/v${apiVersion}`;
+  }
+
+  private static compareVersions(left: string, right: string): number {
+    const [leftMajor, leftMinor] = DockerEngineClient.versionParts(left);
+    const [rightMajor, rightMinor] = DockerEngineClient.versionParts(right);
+    return leftMajor - rightMajor || leftMinor - rightMinor;
+  }
+
+  private static versionParts(apiVersion: string): [number, number] {
+    const match = /^(\d+)\.(\d+)$/.exec(apiVersion);
+    if (match === null) {
+      throw new Error("Docker Engine API version must use major.minor format");
+    }
+    return [Number(match[1]), Number(match[2])];
+  }
+
+  private requestPath(
+    method: string,
+    path: string,
+    body: unknown,
+    acceptedStatuses: readonly number[],
   ): Promise<unknown> {
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
     return new Promise((resolve, reject) => {
       const outgoing = request({
         socketPath: this.options.socketPath,
         method,
-        path: `${this.apiPrefix}${path}`,
+        path,
         headers: payload === undefined
           ? { accept: "application/json" }
           : {

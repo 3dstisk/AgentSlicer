@@ -131,6 +131,8 @@ services:
       AGENT_SLICER_POOL_LEASE_TTL_MS: "1800000"
       AGENT_SLICER_POOL_RETRY_DELAY_MS: "5000"
 
+      # Docker Engine 29+ no longer accepts the pool image's former 1.43 default.
+      AGENT_SLICER_POOL_DOCKER_API_VERSION: "1.44"
       AGENT_SLICER_POOL_WORKER_IMAGE: ghcr.io/3dstisk/agentslicer:latest
       AGENT_SLICER_POOL_NETWORK: agent-slicer-pool
       AGENT_SLICER_POOL_WORKER_MCP_PORT: "8765"

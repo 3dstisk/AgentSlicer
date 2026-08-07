@@ -14,7 +14,7 @@ export interface AgentPoolConfig {
   leaseTtlMs: number;
   retryDelayMs: number;
   dockerSocketPath: string;
-  dockerApiVersion: string;
+  dockerApiVersion?: string;
   workerImage: string;
   workerNetwork: string;
   workerMcpPort: number;
@@ -69,6 +69,17 @@ function csv(value: string, name: string): string[] {
     throw new Error(`${name} must not be empty`);
   }
   return entries;
+}
+
+function dockerApiVersion(value: string | undefined): string | undefined {
+  const normalized = value?.trim();
+  if (normalized === undefined || normalized.length === 0) {
+    return undefined;
+  }
+  if (!/^\d+\.\d+$/.test(normalized)) {
+    throw new Error("AGENT_SLICER_POOL_DOCKER_API_VERSION must use major.minor format");
+  }
+  return normalized;
 }
 
 function isLoopback(host: string): boolean {
@@ -146,7 +157,7 @@ export function loadPoolConfig(env: NodeJS.ProcessEnv = process.env): AgentPoolC
       env.AGENT_SLICER_POOL_DOCKER_SOCKET ?? "/var/run/docker.sock",
       "AGENT_SLICER_POOL_DOCKER_SOCKET",
     ),
-    dockerApiVersion: env.AGENT_SLICER_POOL_DOCKER_API_VERSION ?? "1.43",
+    dockerApiVersion: dockerApiVersion(env.AGENT_SLICER_POOL_DOCKER_API_VERSION),
     workerImage: env.AGENT_SLICER_POOL_WORKER_IMAGE ?? "ghcr.io/3dstisk/agentslicer:latest",
     workerNetwork: env.AGENT_SLICER_POOL_NETWORK ?? "agent-slicer-pool",
     workerMcpPort: integer(

@@ -1,8 +1,13 @@
+import { randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { DockerWorkerProvisioner, type DockerApi } from "../src/docker-engine.js";
+import {
+  DockerEngineClient,
+  DockerWorkerProvisioner,
+  type DockerApi,
+} from "../src/docker-engine.js";
 import type { AgentPoolConfig } from "../src/pool-config.js";
 import { loadPoolConfig } from "../src/pool-config.js";
 import {
@@ -65,6 +70,17 @@ async function listen(server: Server): Promise<number> {
     throw new Error("Test server did not bind a TCP port");
   }
   return address.port;
+}
+
+async function listenOnSocket(server: Server): Promise<string> {
+  const socketPath = process.platform === "win32"
+    ? `\\\\.\\pipe\\agent-slicer-${randomUUID()}`
+    : `/tmp/agent-slicer-${randomUUID()}.sock`;
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, resolve);
+  });
+  return socketPath;
 }
 
 function poolConfig(overrides: Partial<AgentPoolConfig> = {}): AgentPoolConfig {
@@ -342,6 +358,75 @@ describe("Docker worker provisioner", () => {
   });
 });
 
+describe("Docker Engine client", () => {
+  it("negotiates the API version once for concurrent requests", async () => {
+    const paths: string[] = [];
+    const daemon = createServer((request, response) => {
+      paths.push(request.url ?? "");
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(request.url === "/version"
+        ? { ApiVersion: "1.51", MinAPIVersion: "1.44" }
+        : []));
+    });
+    servers.push(daemon);
+    const socketPath = await listenOnSocket(daemon);
+    const docker = new DockerEngineClient({ socketPath });
+
+    await expect(Promise.all([
+      docker.request("GET", "/containers/json"),
+      docker.request("GET", "/containers/json"),
+    ])).resolves.toEqual([[], []]);
+
+    expect(paths).toEqual([
+      "/version",
+      "/v1.44/containers/json",
+      "/v1.44/containers/json",
+    ]);
+  });
+
+  it("retries API discovery after a transient failure", async () => {
+    let versionRequests = 0;
+    const paths: string[] = [];
+    const daemon = createServer((request, response) => {
+      paths.push(request.url ?? "");
+      if (request.url === "/version" && versionRequests++ === 0) {
+        response.writeHead(500, { "content-type": "application/json" });
+        response.end(JSON.stringify({ message: "temporary failure" }));
+        return;
+      }
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(request.url === "/version"
+        ? { ApiVersion: "1.43" }
+        : []));
+    });
+    servers.push(daemon);
+    const socketPath = await listenOnSocket(daemon);
+    const docker = new DockerEngineClient({ socketPath });
+
+    await expect(docker.request("GET", "/containers/json")).rejects.toThrow("temporary failure");
+    await expect(docker.request("GET", "/containers/json")).resolves.toEqual([]);
+
+    expect(versionRequests).toBe(2);
+    expect(paths).toEqual(["/version", "/version", "/v1.43/containers/json"]);
+  });
+
+  it("honors an explicit API version without auto-detection", async () => {
+    const paths: string[] = [];
+    const daemon = createServer((request, response) => {
+      paths.push(request.url ?? "");
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end("{}");
+    });
+    servers.push(daemon);
+    const socketPath = await listenOnSocket(daemon);
+    const docker = new DockerEngineClient({ socketPath, apiVersion: "1.44" });
+
+    await expect(docker.request("GET", "/info")).resolves.toEqual({});
+
+    expect(paths).toEqual(["/v1.44/info"]);
+  });
+});
+
 describe("pool configuration", () => {
   it("requires a strong management token and validates worker environment", () => {
     expect(() => loadPoolConfig({ AGENT_SLICER_POOL_TOKEN: "short" })).toThrow(
@@ -355,16 +440,22 @@ describe("pool configuration", () => {
       AGENT_SLICER_POOL_TOKEN: "p".repeat(48),
       AGENT_SLICER_POOL_WORKER_ENV: "AGENT_SLICER_TOKEN=override",
     })).toThrow("pool-managed settings");
-    expect(loadPoolConfig({
+    const config = loadPoolConfig({
       AGENT_SLICER_POOL_TOKEN: "p".repeat(48),
       AGENT_SLICER_POOL_SIZE: "3",
       AGENT_SLICER_POOL_ID: "production-a",
       AGENT_SLICER_POOL_WORKER_ENV: "ORCA_SCREEN_WIDTH=1280\nORCA_SCREEN_HEIGHT=720",
-    })).toMatchObject({
+    });
+    expect(config).toMatchObject({
       poolSize: 3,
       poolId: "production-a",
       workerEnvironment: ["ORCA_SCREEN_WIDTH=1280", "ORCA_SCREEN_HEIGHT=720"],
     });
+    expect(config.dockerApiVersion).toBeUndefined();
+    expect(loadPoolConfig({
+      AGENT_SLICER_POOL_TOKEN: "p".repeat(48),
+      AGENT_SLICER_POOL_DOCKER_API_VERSION: "1.44",
+    }).dockerApiVersion).toBe("1.44");
     expect(() => loadPoolConfig({
       AGENT_SLICER_POOL_TOKEN: "p".repeat(48),
       AGENT_SLICER_POOL_ID: "invalid pool id",

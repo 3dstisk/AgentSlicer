@@ -108,6 +108,7 @@ queue returns `429`; an acquisition timeout returns `503`. Both include
 | `AGENT_SLICER_POOL_WORKER_IMAGE` | `ghcr.io/3dstisk/agentslicer:latest` | Disposable worker image. |
 | `AGENT_SLICER_POOL_NETWORK` | `agent-slicer-pool` | Private Docker network shared with workers. |
 | `AGENT_SLICER_POOL_DOCKER_SOCKET` | `/var/run/docker.sock` | Docker Engine Unix socket. |
+| `AGENT_SLICER_POOL_DOCKER_API_VERSION` | negotiated (up to `1.44`) | Optional fixed Docker Engine API version; setting it disables negotiation. |
 | `AGENT_SLICER_POOL_WORKER_READY_TIMEOUT_MS` | `180000` | Worker `/readyz` startup deadline. |
 | `AGENT_SLICER_POOL_WORKER_SHM_BYTES` | `1073741824` | Per-worker `/dev/shm` size. |
 | `AGENT_SLICER_POOL_WORKER_ENV` | empty | Newline-delimited extra `NAME=value` worker settings. |
