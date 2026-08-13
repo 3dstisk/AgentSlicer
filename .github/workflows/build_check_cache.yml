@@ -64,3 +64,4 @@ jobs:
       arch: ${{ inputs.arch }}
       build-deps-only: ${{ inputs.build-deps-only }}
       force-build: ${{ inputs.force-build }}
+    secrets: inherit

@@ -28,6 +28,7 @@ jobs:
       ver_pure:
       ubuntu-ver: '2404'
       ubuntu-ver-str: '_Ubuntu2404'
+      ORCA_TEST_REPO_REV: '0dfd8df467895d7093d50b267c7209fd53f43a40'
       ORCA_UPDATER_SIG_KEY: ${{ secrets.ORCA_UPDATER_SIG_KEY }}
       # Branches whose builds are published to the nightly release. The
       # belt-printer branch ships alongside main but its assets carry a `_belt`
@@ -546,7 +547,10 @@ jobs:
         run: |
           test_repo_dir="${{ runner.temp }}/orca-test-repo"
           rm -rf "$test_repo_dir"
-          git clone --depth 1 https://github.com/OrcaSlicer/orca-test-repo.git "$test_repo_dir"
+          git init "$test_repo_dir"
+          git -C "$test_repo_dir" remote add origin https://github.com/OrcaSlicer/orca-test-repo.git
+          git -C "$test_repo_dir" fetch --depth 1 origin "$ORCA_TEST_REPO_REV"
+          git -C "$test_repo_dir" checkout --detach FETCH_HEAD
           python3 "$test_repo_dir/run_test.py" "${{ github.workspace }}/build/package/bin/orca-slicer"
 
       - name: Build orca_custom_preset_tests

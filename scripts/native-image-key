@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+treeish=${1:-HEAD}
+
+cd "$repo_root"
+
+# Hash the tracked tree entries that can affect the native Linux runtime or its
+# tests. MCP, container orchestration, and documentation changes are layered on
+# top of the native image and must not invalidate this key.
+git ls-tree -r -z "$treeish" |
+    while IFS= read -r -d '' entry; do
+        path=${entry#*$'\t'}
+        case "$path" in
+            src/agent-mcp/*|docker/agent-slicer/*|docker/agent-pool/*|docs/*|scripts/agent-slicer-*|\
+            .github/FUNDING.yml|.github/ISSUE_TEMPLATE/*|.github/dependabot.yml|\
+            .github/pull_request_template.md|.github/workflows/release-agent-slicer.yml|\
+            .github/workflows/shellcheck.yml|AGENTS.md|CLAUDE.md|README.md|SECURITY.md|\
+            compose.*|portainer-stack.yaml)
+                continue
+                ;;
+        esac
+        printf '%s\0' "$entry"
+    done |
+    git hash-object --stdin

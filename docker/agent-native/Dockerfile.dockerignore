@@ -1,0 +1,9 @@
+*
+!docker/
+docker/*
+!docker/agent-native/
+docker/agent-native/*
+!docker/agent-native/Dockerfile
+!docker/agent-native/dist/
+docker/agent-native/dist/*
+!docker/agent-native/dist/OrcaSlicer.AppImage

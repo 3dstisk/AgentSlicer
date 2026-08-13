@@ -47,6 +47,7 @@ internal_docs/
 *.flatpak
 /flatpak-repo/
 /runtime/
+/docker/agent-native/dist/
 /docker/agent-slicer/dist/
 /.omx/
 # Python bytecode

@@ -12,28 +12,95 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  # Bump this epoch when the native runner/toolchain or updater-signing input
+  # changes without a corresponding tracked-file change.
+  NATIVE_IMAGE_CACHE_VERSION: v1
+
 jobs:
+  native-image:
+    name: Resolve native OrcaSlicer image
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      candidate-image: ${{ steps.identity.outputs.candidate-image }}
+      exists: ${{ steps.lookup.outputs.exists }}
+      image: ${{ steps.identity.outputs.image }}
+      key: ${{ steps.identity.outputs.key }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          lfs: "false"
+
+      - name: Compute native image identity
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner=${GITHUB_REPOSITORY_OWNER,,}
+          native_key=$(scripts/native-image-key HEAD)
+          image="ghcr.io/$owner/agentslicer-native:linux-amd64-${NATIVE_IMAGE_CACHE_VERSION}-${native_key}"
+          candidate_image="ghcr.io/$owner/agentslicer-native:candidate-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          echo "key=$native_key" >> "$GITHUB_OUTPUT"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "candidate-image=$candidate_image" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check native image
+        id: lookup
+        env:
+          NATIVE_IMAGE: ${{ steps.identity.outputs.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if inspect_output=$(docker manifest inspect "$NATIVE_IMAGE" 2>&1); then
+            echo "Reusing $NATIVE_IMAGE"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          elif grep -Eqi 'manifest unknown|no such manifest' <<< "$inspect_output"; then
+            echo "No native image found for this source tree"
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$inspect_output" >&2
+            exit 1
+          fi
+
   build-linux-x86_64:
     name: Build OrcaSlicer Linux x86_64
+    needs: native-image
+    if: needs.native-image.outputs.exists != 'true'
     uses: ./.github/workflows/build_check_cache.yml
     with:
       os: ubuntu-24.04
+    secrets: inherit
 
   test-linux-x86_64:
     name: Test OrcaSlicer Linux x86_64
-    needs: build-linux-x86_64
+    needs: [native-image, build-linux-x86_64]
+    if: needs.native-image.outputs.exists != 'true' && needs.build-linux-x86_64.result == 'success'
     uses: ./.github/workflows/unit_tests.yml
     with:
       os: ubuntu-24.04
       artifact: ${{ github.sha }}-tests-linux-x86_64
 
-  publish:
-    name: Test and publish worker plus pool images
-    needs: [build-linux-x86_64, test-linux-x86_64]
+  publish-native-image:
+    name: Publish native OrcaSlicer candidate
+    needs: [native-image, build-linux-x86_64, test-linux-x86_64]
+    if: ${{ always() && !cancelled() && needs.native-image.outputs.exists != 'true' && needs.build-linux-x86_64.result == 'success' && needs.test-linux-x86_64.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
       packages: write
+    outputs:
+      candidate-digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -47,15 +114,125 @@ jobs:
           path: release
           merge-multiple: true
 
-      - name: Prepare Docker context
+      - name: Prepare native image context
         shell: bash
         run: |
           set -euo pipefail
           appimage=$(find release -maxdepth 1 -type f -name '*.AppImage' -print -quit)
           test -n "$appimage"
           chmod 0755 "$appimage"
-          mkdir -p docker/agent-slicer/dist
-          cp "$appimage" docker/agent-slicer/dist/OrcaSlicer.AppImage
+          mkdir -p docker/agent-native/dist
+          cp "$appimage" docker/agent-native/dist/OrcaSlicer.AppImage
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Another tag with the same native key may have published while this run
+      # was compiling. Avoid publishing a redundant candidate when that happens.
+      - name: Recheck native image
+        id: recheck
+        env:
+          NATIVE_IMAGE: ${{ needs.native-image.outputs.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if inspect_output=$(docker manifest inspect "$NATIVE_IMAGE" 2>&1); then
+            echo "Reusing $NATIVE_IMAGE published by another run"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          elif grep -Eqi 'manifest unknown|no such manifest' <<< "$inspect_output"; then
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$inspect_output" >&2
+            exit 1
+          fi
+
+      - name: Build and publish native candidate
+        id: build
+        if: steps.recheck.outputs.exists != 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/agent-native/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ needs.native-image.outputs.candidate-image }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.native-image.outputs.key }}
+          cache-from: type=gha,scope=agent-slicer-native
+          cache-to: type=gha,mode=max,scope=agent-slicer-native
+
+  resolve-native-image:
+    name: Pin native OrcaSlicer image digest
+    needs: [native-image, publish-native-image]
+    if: ${{ always() && !cancelled() && (needs.native-image.outputs.exists == 'true' || needs.publish-native-image.result == 'success') }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
+      promote: ${{ steps.resolve.outputs.promote }}
+      source-image: ${{ steps.resolve.outputs.source-image }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve immutable digest
+        id: resolve
+        env:
+          CANDIDATE_DIGEST: ${{ needs.publish-native-image.outputs.candidate-digest }}
+          CANDIDATE_IMAGE: ${{ needs.native-image.outputs.candidate-image }}
+          NATIVE_IMAGE: ${{ needs.native-image.outputs.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if inspect_output=$(docker manifest inspect "$NATIVE_IMAGE" 2>&1); then
+            source_image=$NATIVE_IMAGE
+            promote=false
+          elif grep -Eqi 'manifest unknown|no such manifest' <<< "$inspect_output"; then
+            [[ "$CANDIDATE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+            repository=${CANDIDATE_IMAGE%:*}
+            source_image=$repository@$CANDIDATE_DIGEST
+            promote=true
+          else
+            echo "$inspect_output" >&2
+            exit 1
+          fi
+          digest=$(docker buildx imagetools inspect "$source_image" --format '{{json .Manifest.Digest}}' | tr -d '"')
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          repository=${NATIVE_IMAGE%:*}
+          echo "image=$repository@$digest" >> "$GITHUB_OUTPUT"
+          echo "promote=$promote" >> "$GITHUB_OUTPUT"
+          echo "source-image=$source_image" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: Test and publish worker plus pool images
+    needs: [native-image, resolve-native-image]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          lfs: "false"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -114,6 +291,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
+            ORCASLICER_NATIVE_IMAGE=${{ needs.resolve-native-image.outputs.image }}
             BUILD_VERSION=${{ github.ref_name }}
             BUILD_REVISION=${{ github.sha }}
           cache-from: type=gha
@@ -155,6 +333,23 @@ jobs:
             runtime/screenshots/
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Promote tested native image
+        if: needs.resolve-native-image.outputs.promote == 'true'
+        env:
+          NATIVE_IMAGE: ${{ needs.native-image.outputs.image }}
+          SOURCE_IMAGE: ${{ needs.resolve-native-image.outputs.source-image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if inspect_output=$(docker manifest inspect "$NATIVE_IMAGE" 2>&1); then
+            echo "Another successful run already promoted $NATIVE_IMAGE"
+          elif grep -Eqi 'manifest unknown|no such manifest' <<< "$inspect_output"; then
+            docker buildx imagetools create --tag "$NATIVE_IMAGE" "$SOURCE_IMAGE"
+          else
+            echo "$inspect_output" >&2
+            exit 1
+          fi
 
       - name: Push tested container tags
         if: github.event_name == 'push'

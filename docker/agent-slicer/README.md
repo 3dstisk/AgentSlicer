@@ -1,12 +1,14 @@
 # AgentSlicer container
 
 The x86_64 image runs OrcaSlicer, its browser desktop, and the authenticated MCP
-server in one container. Main-branch pushes, manual runs, and tagged commits
-build a fresh AppImage, package it into the image, run the Linux x86_64 native
-unit tests (including the agent bridge), and run the complete Docker E2E.
-Successful main-branch pushes publish `latest` and an immutable SHA tag. Tagged
-commits publish the version tag and update `latest`; manual runs only verify the
-image.
+server in one container. Tagged commits reuse a validated, content-keyed native
+OrcaSlicer image when the C++, native resources, and native tests are unchanged.
+A cache miss builds a fresh AppImage, runs the Linux x86_64 native unit tests
+(including the agent bridge), and pushes a native candidate. The candidate
+becomes a reusable native image only after the complete Docker E2E passes.
+Every tagged release still rebuilds and verifies the MCP layer.
+The keyed native tags are a workflow-managed cache, so GHCR package-write access
+is part of the release trust boundary.
 
 The authoritative v1 tool and security contract is in
 [the MCP API documentation](../../docs/mcp-api.md).
@@ -62,11 +64,16 @@ Exports and saves use private staging files and are published atomically beneath
 `runtime/outputs`. List them with authenticated `GET /outputs/` requests or
 download the exact result path returned by MCP using the same bearer token.
 
-To build the image locally, first place an x86_64 AppImage at
-`docker/agent-slicer/dist/OrcaSlicer.AppImage`, then run:
+To build locally, place an x86_64 AppImage at
+`docker/agent-native/dist/OrcaSlicer.AppImage`, then build the native layer and
+the MCP layer:
 
 ```bash
-docker compose -f compose.yaml -f compose.build.yaml build
+docker build --platform linux/amd64 \
+  -t agent-slicer-native:dev \
+  -f docker/agent-native/Dockerfile .
+ORCASLICER_NATIVE_IMAGE=agent-slicer-native:dev \
+  docker compose -f compose.yaml -f compose.build.yaml build
 docker compose -f compose.yaml -f compose.build.yaml up -d
 ```
 
