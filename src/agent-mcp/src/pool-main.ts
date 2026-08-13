@@ -24,6 +24,10 @@ const pool = new WarmWorkerPool(provisioner, {
   leaseTtlMs: config.leaseTtlMs,
   maxQueue: config.maxQueue,
   retryDelayMs: config.retryDelayMs,
+  log: (event) => process.stdout.write(`${JSON.stringify({
+    timestamp: new Date().toISOString(),
+    ...event,
+  })}\n`),
 });
 
 const reconciledWorkers = await provisioner.reconcile();

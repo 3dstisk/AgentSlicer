@@ -154,6 +154,14 @@ cancellation returns the same stable job snapshot shape as `job_get`, with
 calling it for a terminal job returns that job unchanged, so a completion that
 was already observed is never rewritten as cancelled.
 
+When the MCP endpoint is reached through the warm-pool gateway, asynchronous
+jobs belong to the leased worker rather than to one HTTP transport connection.
+Retain both the lease token and `job_id`: after a transport interruption, create
+a new MCP connection with the same lease token and continue polling `job_get`.
+Long-running slices should poll or use the pool lease heartbeat before the idle
+lease deadline. `slice_start` remains asynchronous; clients must not wait for a
+single long-running slicing HTTP response.
+
 `model_import` always exposes `metadata: {}` (including immediate startup
 failure); native bridge implementations must not serialize that field as `null`.
 

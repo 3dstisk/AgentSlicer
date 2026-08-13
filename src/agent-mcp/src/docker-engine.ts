@@ -280,7 +280,14 @@ export class DockerWorkerProvisioner implements WorkerProvisioner {
       return { id: containerId, baseUrl, bearerToken };
     } catch (error) {
       if (containerId !== undefined) {
-        await this.destroyById(containerId);
+        try {
+          await this.destroyById(containerId);
+        } catch (cleanupError) {
+          throw new AggregateError(
+            [error, cleanupError],
+            "AgentSlicer worker provisioning and cleanup both failed",
+          );
+        }
       }
       throw error;
     }
@@ -329,17 +336,12 @@ export class DockerWorkerProvisioner implements WorkerProvisioner {
   }
 
   private async destroyById(containerId: string): Promise<void> {
-    try {
-      await this.docker.request(
-        "DELETE",
-        `/containers/${encodeURIComponent(containerId)}?force=true&v=true`,
-        undefined,
-        [204, 404],
-      );
-    } catch {
-      // A failed cleanup is retried by Docker/operator reconciliation; never
-      // make a released worker eligible for another lease.
-    }
+    await this.docker.request(
+      "DELETE",
+      `/containers/${encodeURIComponent(containerId)}?force=true&v=true`,
+      undefined,
+      [204, 404],
+    );
   }
 
   private async workerBaseUrl(containerId: string): Promise<URL> {

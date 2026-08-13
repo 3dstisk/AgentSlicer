@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { createServer, type Server } from "node:http";
+import { createServer, request as httpRequest, type Server } from "node:http";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -21,8 +21,10 @@ import { createAgentPoolHttpServer, type AgentPoolHttpServer } from "../src/pool
 class FakeProvisioner implements WorkerProvisioner {
   nextId = 1;
   readonly destroyed: string[] = [];
+  readonly destroyAttempts: string[] = [];
   readonly provisioned: string[] = [];
   readonly unhealthy = new Set<string>();
+  destroyFailures = 0;
   backendUrl = new URL("http://127.0.0.1:9999");
 
   async provision(): Promise<PoolWorker> {
@@ -36,11 +38,28 @@ class FakeProvisioner implements WorkerProvisioner {
   }
 
   async destroy(worker: PoolWorker): Promise<void> {
+    this.destroyAttempts.push(worker.id);
+    if (this.destroyFailures > 0) {
+      --this.destroyFailures;
+      throw new Error("worker cleanup failed");
+    }
     this.destroyed.push(worker.id);
   }
 
   async healthy(worker: PoolWorker): Promise<boolean> {
     return !this.unhealthy.has(worker.id);
+  }
+}
+
+class FlakyProvisioner extends FakeProvisioner {
+  provisionFailures = 0;
+
+  override async provision(): Promise<PoolWorker> {
+    if (this.provisionFailures > 0) {
+      --this.provisionFailures;
+      throw new Error("worker startup failed");
+    }
+    return super.provision();
   }
 }
 
@@ -81,6 +100,19 @@ async function listenOnSocket(server: Server): Promise<string> {
     server.listen(socketPath, resolve);
   });
   return socketPath;
+}
+
+async function waitFor(
+  predicate: () => boolean,
+  timeoutMs = 1_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) {
+      throw new Error("Timed out waiting for test condition");
+    }
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 function poolConfig(overrides: Partial<AgentPoolConfig> = {}): AgentPoolConfig {
@@ -185,9 +217,158 @@ describe("warm worker pool", () => {
     expect(provisioner.destroyed).toContain("worker-1");
     expect(pool.stats()).toMatchObject({ ready: 0, leased: 1, warming: 0 });
   });
+
+  it("does not publish an unhealthy provisioned worker as available capacity", async () => {
+    const provisioner = new FakeProvisioner();
+    provisioner.unhealthy.add("worker-1");
+    const pool = new WarmWorkerPool(provisioner, {
+      size: 1,
+      leaseTtlMs: 60_000,
+      maxQueue: 1,
+      retryDelayMs: 5,
+    });
+    pools.push(pool);
+
+    await pool.start();
+    await waitFor(() => provisioner.provisioned.includes("worker-2"));
+
+    expect(provisioner.destroyed).toContain("worker-1");
+    expect(pool.stats()).toMatchObject({ ready: 1, leased: 0, warming: 0 });
+    const lease = await pool.acquire(0);
+    expect(lease.worker.id).toBe("worker-2");
+  });
+
+  it("removes an aborted acquisition and deterministically replaces a cancelled lease", async () => {
+    const provisioner = new FakeProvisioner();
+    const pool = new WarmWorkerPool(provisioner, {
+      size: 1,
+      leaseTtlMs: 60_000,
+      maxQueue: 2,
+      retryDelayMs: 5,
+    });
+    pools.push(pool);
+    await pool.start();
+    const lease = await pool.acquire(0);
+    const abandoned = new AbortController();
+    const acquisition = pool.acquire(1_000, abandoned.signal);
+    await waitFor(() => pool.stats().queued === 1);
+
+    abandoned.abort();
+    await expect(acquisition).rejects.toThrow("abandoned");
+    expect(pool.stats().queued).toBe(0);
+
+    const replacement = pool.acquire(1_000);
+    await expect(pool.release(lease.token, lease.leaseId)).resolves.toBe(true);
+    await expect(replacement).resolves.toMatchObject({ worker: { id: "worker-2" } });
+    expect(provisioner.destroyed.filter((id) => id === "worker-1")).toHaveLength(1);
+  });
+
+  it("retries failed reclamation without making the abandoned worker allocatable", async () => {
+    const provisioner = new FakeProvisioner();
+    const pool = new WarmWorkerPool(provisioner, {
+      size: 1,
+      leaseTtlMs: 60_000,
+      maxQueue: 1,
+      retryDelayMs: 5,
+    });
+    pools.push(pool);
+    await pool.start();
+    const lease = await pool.acquire(0);
+    provisioner.destroyFailures = 1;
+
+    await expect(pool.release(lease.token, lease.leaseId)).resolves.toBe(true);
+    expect(pool.leaseForToken(lease.token)).toBeUndefined();
+    expect(pool.stats().unhealthy).toBe(1);
+    const replacement = await pool.acquire(1_000);
+    expect(replacement.worker.id).toBe("worker-2");
+    await waitFor(() => provisioner.destroyed.includes("worker-1"));
+
+    expect(provisioner.destroyAttempts.filter((id) => id === "worker-1")).toHaveLength(2);
+    expect(pool.stats().unhealthy).toBe(0);
+    expect(pool.metrics().workerReclamationFailures).toBe(1);
+    expect(pool.metrics().workerReclamations).toMatchObject({ released: 1 });
+  });
 });
 
 describe("pool HTTP gateway", () => {
+  it("returns typed retryable capacity failures with safe counts and retry guidance", async () => {
+    const provisioner = new FakeProvisioner();
+    const pool = new WarmWorkerPool(provisioner, {
+      size: 1,
+      leaseTtlMs: 60_000,
+      maxQueue: 1,
+    });
+    pools.push(pool);
+    await pool.start();
+    await pool.acquire(0);
+    const config = poolConfig();
+    const gateway = createAgentPoolHttpServer(config, pool);
+    poolServers.push(gateway);
+    const gatewayPort = await listen(gateway.server);
+
+    const response = await fetch(`http://127.0.0.1:${gatewayPort}/leases`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${config.bearerToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ wait_ms: 0 }),
+    });
+
+    expect(response.status).toBe(503);
+    expect(response.headers.get("retry-after")).toMatch(/^\d+$/);
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        code: "capacity_unavailable",
+        message: expect.any(String),
+      },
+      retryable: true,
+      retryAfterMs: expect.any(Number),
+      pool: {
+        ready: 0,
+        leased: 1,
+        starting: 0,
+        unhealthy: 0,
+      },
+    });
+  });
+
+  it("reports a full lease queue as a typed retryable allocation failure", async () => {
+    const provisioner = new FakeProvisioner();
+    const pool = new WarmWorkerPool(provisioner, {
+      size: 1,
+      leaseTtlMs: 60_000,
+      maxQueue: 1,
+    });
+    pools.push(pool);
+    await pool.start();
+    await pool.acquire(0);
+    void pool.acquire(1_000).catch(() => undefined);
+    await waitFor(() => pool.stats().queued === 1);
+    const config = poolConfig();
+    const gateway = createAgentPoolHttpServer(config, pool);
+    poolServers.push(gateway);
+    const gatewayPort = await listen(gateway.server);
+
+    const response = await fetch(`http://127.0.0.1:${gatewayPort}/leases`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${config.bearerToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ wait_ms: 100 }),
+    });
+
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toMatch(/^\d+$/);
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: "lease_queue_full", message: expect.any(String) },
+      retryable: true,
+      retryAfterMs: expect.any(Number),
+      pool: { ready: 0, leased: 1, starting: 0, unhealthy: 0 },
+    });
+  });
+
   it("authenticates leases, rewrites backend auth, proxies, and revokes on release", async () => {
     let backendAuthorization: string | undefined;
     let backendPath: string | undefined;
@@ -270,6 +451,253 @@ describe("pool HTTP gateway", () => {
       headers: { authorization: `Bearer ${config.bearerToken}` },
     });
     expect(response.status).toBe(401);
+  });
+
+  it("preserves structured MCP job errors through the lease proxy", async () => {
+    const job = {
+      job_id: "slice-job-1",
+      state: "failed",
+      error: {
+        code: "slice_failed",
+        message: "Native slicer failed",
+        details: { plate_index: 0 },
+      },
+    };
+    const backend = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(job));
+    });
+    servers.push(backend);
+    const backendPort = await listen(backend);
+    const provisioner = new FakeProvisioner();
+    provisioner.backendUrl = new URL(`http://127.0.0.1:${backendPort}`);
+    const pool = new WarmWorkerPool(provisioner, {
+      size: 1,
+      leaseTtlMs: 60_000,
+      maxQueue: 1,
+    });
+    pools.push(pool);
+    await pool.start();
+    const config = poolConfig();
+    const gateway = createAgentPoolHttpServer(config, pool);
+    poolServers.push(gateway);
+    const gatewayPort = await listen(gateway.server);
+    const origin = `http://127.0.0.1:${gatewayPort}`;
+    const acquired = await fetch(`${origin}/leases`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${config.bearerToken}` },
+      body: JSON.stringify({ wait_ms: 0 }),
+    });
+    const lease = await acquired.json() as { token: string };
+
+    const result = await fetch(`${origin}/mcp`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${lease.token}` },
+      body: JSON.stringify({ method: "job_get", params: { job_id: job.job_id } }),
+    });
+
+    expect(result.status).toBe(200);
+    await expect(result.json()).resolves.toEqual(job);
+  });
+
+  it("renews a long-running lease only through an explicit heartbeat and later reclaims it", async () => {
+    const backend = createServer((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ state: "running" }));
+    });
+    servers.push(backend);
+    const backendPort = await listen(backend);
+    const provisioner = new FakeProvisioner();
+    provisioner.backendUrl = new URL(`http://127.0.0.1:${backendPort}`);
+    const pool = new WarmWorkerPool(provisioner, {
+      size: 1,
+      leaseTtlMs: 300,
+      maxQueue: 1,
+      retryDelayMs: 5,
+    });
+    pools.push(pool);
+    await pool.start();
+    const config = poolConfig({ leaseTtlMs: 300 });
+    const gateway = createAgentPoolHttpServer(config, pool);
+    poolServers.push(gateway);
+    const gatewayPort = await listen(gateway.server);
+    const origin = `http://127.0.0.1:${gatewayPort}`;
+    const acquired = await fetch(`${origin}/leases`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${config.bearerToken}` },
+      body: JSON.stringify({ wait_ms: 0 }),
+    });
+    const lease = await acquired.json() as { lease_id: string; token: string; expires_at: string };
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const heartbeat = await fetch(`${origin}/leases/${lease.lease_id}`, {
+      method: "PATCH",
+      headers: { authorization: `Bearer ${lease.token}` },
+    });
+    expect(heartbeat.status).toBe(200);
+    await expect(heartbeat.json()).resolves.toMatchObject({
+      lease_id: lease.lease_id,
+      renewed: true,
+      expires_at: expect.any(String),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const polling = await fetch(`${origin}/mcp`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${lease.token}` },
+    });
+    expect(polling.status).toBe(200);
+
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    const expired = await fetch(`${origin}/mcp`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${lease.token}` },
+    });
+    expect(expired.status).toBe(401);
+    await waitFor(() => provisioner.destroyed.includes("worker-1"));
+  });
+
+  it("reconnects separate proxy requests with the same lease token and job id", async () => {
+    const calls: Array<{ authorization?: string; body: string }> = [];
+    let observeInterruptedRequest: (() => void) | undefined;
+    const interruptedRequest = new Promise<void>((resolve) => {
+      observeInterruptedRequest = resolve;
+    });
+    const backend = createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on("data", (chunk: Buffer) => {
+        chunks.push(chunk);
+      });
+      request.on("end", () => {
+        const body = Buffer.concat(chunks).toString("utf8");
+        calls.push({ authorization: request.headers.authorization, body });
+        const params = JSON.parse(body) as {
+          method: string;
+          params?: { job_id?: string; interrupt?: boolean };
+        };
+        if (params.params?.interrupt === true) {
+          observeInterruptedRequest?.();
+          return;
+        }
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify(params.method === "slice_start"
+          ? { job_id: "slice-job-1", state: "running" }
+          : { job_id: params.params?.job_id, state: "succeeded" }));
+      });
+    });
+    servers.push(backend);
+    const backendPort = await listen(backend);
+    const provisioner = new FakeProvisioner();
+    provisioner.backendUrl = new URL(`http://127.0.0.1:${backendPort}`);
+    const pool = new WarmWorkerPool(provisioner, { size: 1, leaseTtlMs: 60_000, maxQueue: 1 });
+    pools.push(pool);
+    await pool.start();
+    const config = poolConfig();
+    const gateway = createAgentPoolHttpServer(config, pool);
+    poolServers.push(gateway);
+    const gatewayPort = await listen(gateway.server);
+    const origin = `http://127.0.0.1:${gatewayPort}`;
+    const acquired = await fetch(`${origin}/leases`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${config.bearerToken}` },
+      body: JSON.stringify({ wait_ms: 0 }),
+    });
+    const lease = await acquired.json() as { token: string };
+    const authorization = `Bearer ${lease.token}`;
+    const started = await fetch(`${origin}/mcp`, {
+      method: "POST",
+      headers: { authorization },
+      body: JSON.stringify({ method: "slice_start" }),
+    });
+    const job = await started.json() as { job_id: string };
+    const interrupted = httpRequest(`${origin}/mcp`, {
+      method: "POST",
+      headers: {
+        authorization,
+        "content-type": "application/json",
+      },
+    });
+    interrupted.on("error", () => {});
+    interrupted.end(JSON.stringify({
+      method: "job_get",
+      params: { job_id: job.job_id, interrupt: true },
+    }));
+    await interruptedRequest;
+    interrupted.destroy();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    const reconnected = await fetch(`${origin}/mcp`, {
+      method: "POST",
+      headers: { authorization },
+      body: JSON.stringify({ method: "job_get", params: { job_id: job.job_id } }),
+    });
+
+    await expect(reconnected.json()).resolves.toEqual({ job_id: "slice-job-1", state: "succeeded" });
+    expect(calls).toEqual([
+      { authorization: "Bearer backend-worker-1", body: JSON.stringify({ method: "slice_start" }) },
+      {
+        authorization: "Bearer backend-worker-1",
+        body: JSON.stringify({
+          method: "job_get",
+          params: { job_id: "slice-job-1", interrupt: true },
+        }),
+      },
+      {
+        authorization: "Bearer backend-worker-1",
+        body: JSON.stringify({ method: "job_get", params: { job_id: "slice-job-1" } }),
+      },
+    ]);
+  });
+
+  it("exposes capacity, health, and Prometheus lifecycle metrics", async () => {
+    const provisioner = new FlakyProvisioner();
+    provisioner.provisionFailures = 1;
+    const pool = new WarmWorkerPool(provisioner, {
+      size: 1,
+      leaseTtlMs: 100,
+      maxQueue: 1,
+      retryDelayMs: 5,
+    });
+    pools.push(pool);
+    await pool.start();
+    await waitFor(() => pool.stats().ready === 1);
+    const lease = await pool.acquire(0);
+    await expect(pool.acquire(10)).rejects.toThrow("Timed out");
+    await expect(pool.acquire(0)).rejects.toThrow("available");
+    await waitFor(() => pool.leaseForToken(lease.token, false) === undefined);
+    await waitFor(() => pool.stats().ready === 1);
+    const config = poolConfig({ leaseTtlMs: 100 });
+    const gateway = createAgentPoolHttpServer(config, pool);
+    poolServers.push(gateway);
+    const gatewayPort = await listen(gateway.server);
+    const origin = `http://127.0.0.1:${gatewayPort}`;
+
+    const capacity = await fetch(`${origin}/capacity`);
+    expect(capacity.status).toBe(200);
+    await expect(capacity.json()).resolves.toMatchObject({
+      ok: true,
+      acceptingLeases: expect.any(Boolean),
+      retryAfterMs: expect.any(Number),
+      pool: {
+        target: 1,
+        ready: expect.any(Number),
+        leased: 0,
+        starting: expect.any(Number),
+        unhealthy: expect.any(Number),
+        queued: 0,
+      },
+    });
+    const health = await fetch(`${origin}/healthz`);
+    expect(health.status).toBe(200);
+    await expect(health.json()).resolves.toMatchObject({ ok: true });
+
+    const metrics = await fetch(`${origin}/metrics`);
+    expect(metrics.status).toBe(200);
+    expect(metrics.headers.get("content-type")).toContain("text/plain");
+    const text = await metrics.text();
+    expect(text).toMatch(/agent_slicer_pool_lease_wait\w*(?:\{[^}]*\})? [1-9]/);
+    expect(text).toMatch(/agent_slicer_pool_allocation_failures_total(?:\{[^}]*\})? [1-9]/);
+    expect(text).toMatch(/agent_slicer_pool_worker_startup_failures_total(?:\{[^}]*\})? [1-9]/);
+    expect(text).toMatch(/agent_slicer_pool_worker_reclamations_total(?:\{[^}]*\})? [1-9]/);
   });
 });
 

@@ -41,6 +41,105 @@ function sendJson(response: ServerResponse, status: number, value: unknown): voi
   response.end(JSON.stringify(value));
 }
 
+function safePoolStats(pool: WarmWorkerPool): {
+  target: number;
+  ready: number;
+  leased: number;
+  starting: number;
+  unhealthy: number;
+  warming: number;
+  queued: number;
+} {
+  const stats = pool.stats();
+  return {
+    target: stats.target,
+    ready: stats.ready,
+    leased: stats.leased,
+    starting: stats.starting,
+    unhealthy: stats.unhealthy,
+    warming: stats.warming,
+    queued: stats.queued,
+  };
+}
+
+function retryAfter(pool: WarmWorkerPool): { milliseconds: number; seconds: number } {
+  const milliseconds = pool.retryAfterMs();
+  return { milliseconds, seconds: Math.max(1, Math.ceil(milliseconds / 1_000)) };
+}
+
+function sendCapacityError(
+  response: ServerResponse,
+  status: number,
+  pool: WarmWorkerPool,
+  code: string,
+  message: string,
+): void {
+  const retry = retryAfter(pool);
+  response.setHeader("retry-after", String(retry.seconds));
+  sendJson(response, status, {
+    error: { code, message },
+    retryable: true,
+    retryAfterMs: retry.milliseconds,
+    pool: safePoolStats(pool),
+  });
+}
+
+function metricLabels(name: string, values: Readonly<Record<string, number>>): string {
+  return Object.entries(values)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([reason, value]) => `${name}{reason=${JSON.stringify(reason)}} ${value}`)
+    .join("\n");
+}
+
+function prometheusMetrics(pool: WarmWorkerPool): string {
+  const stats = safePoolStats(pool);
+  const metrics = pool.metrics();
+  const allocationFailures = {
+    capacity_unavailable: 0,
+    client_abandoned: 0,
+    pool_closed: 0,
+    queue_full: 0,
+    ...metrics.allocationFailures,
+  };
+  const reclamations = {
+    expired: 0,
+    invalidated: 0,
+    released: 0,
+    startup_readiness_failed: 0,
+    unhealthy_before_allocation: 0,
+    ...metrics.workerReclamations,
+  };
+  const lines = [
+    "# HELP agent_slicer_pool_workers Current workers by lifecycle state.",
+    "# TYPE agent_slicer_pool_workers gauge",
+    `agent_slicer_pool_workers{state="ready"} ${stats.ready}`,
+    `agent_slicer_pool_workers{state="leased"} ${stats.leased}`,
+    `agent_slicer_pool_workers{state="starting"} ${stats.starting}`,
+    `agent_slicer_pool_workers{state="unhealthy"} ${stats.unhealthy}`,
+    "# HELP agent_slicer_pool_lease_wait_duration_seconds Time spent acquiring a worker lease.",
+    "# TYPE agent_slicer_pool_lease_wait_duration_seconds histogram",
+    ...metrics.leaseWait.buckets.map(({ upperBoundMs, count }) =>
+      `agent_slicer_pool_lease_wait_duration_seconds_bucket{le="${upperBoundMs / 1_000}"} ${count}`
+    ),
+    `agent_slicer_pool_lease_wait_duration_seconds_bucket{le="+Inf"} ${metrics.leaseWait.count}`,
+    `agent_slicer_pool_lease_wait_duration_seconds_sum ${metrics.leaseWait.sumMs / 1_000}`,
+    `agent_slicer_pool_lease_wait_duration_seconds_count ${metrics.leaseWait.count}`,
+    "# HELP agent_slicer_pool_allocation_failures_total Failed worker lease allocations.",
+    "# TYPE agent_slicer_pool_allocation_failures_total counter",
+    metricLabels("agent_slicer_pool_allocation_failures_total", allocationFailures),
+    "# HELP agent_slicer_pool_worker_startup_failures_total Workers that failed provisioning or final readiness.",
+    "# TYPE agent_slicer_pool_worker_startup_failures_total counter",
+    `agent_slicer_pool_worker_startup_failures_total ${metrics.workerStartupFailures}`,
+    "# HELP agent_slicer_pool_worker_reclamations_total Workers destroyed after lease or health lifecycle events.",
+    "# TYPE agent_slicer_pool_worker_reclamations_total counter",
+    metricLabels("agent_slicer_pool_worker_reclamations_total", reclamations),
+    "# HELP agent_slicer_pool_worker_reclamation_failures_total Failed worker destruction attempts.",
+    "# TYPE agent_slicer_pool_worker_reclamation_failures_total counter",
+    `agent_slicer_pool_worker_reclamation_failures_total ${metrics.workerReclamationFailures}`,
+  ];
+  return `${lines.filter((line) => line.length > 0).join("\n")}\n`;
+}
+
 function bearerToken(request: IncomingMessage): string | undefined {
   const authorization = request.headers.authorization;
   if (typeof authorization !== "string" || !authorization.startsWith("Bearer ")) {
@@ -124,6 +223,7 @@ async function proxyToWorker(
   const target = new URL(`${incomingUrl.pathname}${incomingUrl.search}`, lease.worker.baseUrl);
   await new Promise<void>((resolve) => {
     let receivedResponse = false;
+    let downstreamAborted = false;
     const upstream = upstreamRequest(target, {
       method: request.method,
       headers: proxyHeaders(request.headers, lease.worker.bearerToken),
@@ -136,13 +236,19 @@ async function proxyToWorker(
       );
       upstreamResponse.once("error", () => {
         response.destroy();
-        void pool.invalidate(leaseToken);
+        if (!downstreamAborted) {
+          void pool.invalidate(leaseToken);
+        }
         resolve();
       });
       upstreamResponse.once("end", resolve);
       upstreamResponse.pipe(response);
     });
     upstream.once("error", () => {
+      if (downstreamAborted) {
+        resolve();
+        return;
+      }
       if (!receivedResponse && !response.headersSent) {
         sendJson(response, 502, { error: "worker_unavailable" });
       } else {
@@ -151,7 +257,16 @@ async function proxyToWorker(
       void pool.invalidate(leaseToken);
       resolve();
     });
-    request.once("aborted", () => upstream.destroy());
+    request.once("aborted", () => {
+      downstreamAborted = true;
+      upstream.destroy();
+    });
+    response.once("close", () => {
+      if (!response.writableEnded) {
+        downstreamAborted = true;
+        upstream.destroy();
+      }
+    });
     request.pipe(upstream);
   });
 }
@@ -174,8 +289,37 @@ export function createAgentPoolHttpServer(
         sendJson(response, 200, { ok: true, service: "agent-slicer-pool" });
         return;
       }
+      if (path === "/capacity") {
+        if (request.method !== "GET") {
+          response.setHeader("allow", "GET");
+          sendJson(response, 405, { error: "method_not_allowed" });
+          return;
+        }
+        const poolStats = safePoolStats(pool);
+        sendJson(response, 200, {
+          ok: true,
+          acceptingLeases: poolStats.ready > 0,
+          retryAfterMs: pool.retryAfterMs(),
+          pool: poolStats,
+        });
+        return;
+      }
+      if (path === "/metrics") {
+        if (request.method !== "GET") {
+          response.setHeader("allow", "GET");
+          sendJson(response, 405, { error: "method_not_allowed" });
+          return;
+        }
+        response.writeHead(200, {
+          "cache-control": "no-store",
+          "content-type": "text/plain; version=0.0.4; charset=utf-8",
+          "x-content-type-options": "nosniff",
+        });
+        response.end(prometheusMetrics(pool));
+        return;
+      }
       if (path === "/readyz" || path === "/healthz") {
-        const stats = pool.stats();
+        const stats = safePoolStats(pool);
         const ready = stats.ready + stats.leased > 0;
         sendJson(response, ready ? 200 : 503, {
           ok: ready,
@@ -222,6 +366,10 @@ export function createAgentPoolHttpServer(
             }
           });
           const lease = await pool.acquire(requestedWait as number, abandoned.signal);
+          if (abandoned.signal.aborted || response.destroyed) {
+            await pool.release(lease.token, lease.leaseId);
+            return;
+          }
           sendJson(response, 201, {
             lease_id: lease.leaseId,
             token: lease.token,
@@ -231,16 +379,33 @@ export function createAgentPoolHttpServer(
             required_headers: {
               authorization: `Bearer ${lease.token}`,
             },
+            heartbeat_path: `/leases/${lease.leaseId}`,
           });
         } catch (error) {
           if (error instanceof PoolQueueFullError) {
-            response.setHeader("retry-after", "5");
-            sendJson(response, 429, { error: "lease_queue_full", pool: pool.stats() });
+            sendCapacityError(
+              response,
+              429,
+              pool,
+              "lease_queue_full",
+              "The AgentSlicer lease queue is full",
+            );
           } else if (error instanceof PoolUnavailableError) {
-            response.setHeader("retry-after", "5");
-            sendJson(response, 503, { error: "no_worker_available", pool: pool.stats() });
+            sendCapacityError(
+              response,
+              503,
+              pool,
+              "capacity_unavailable",
+              "No healthy AgentSlicer worker became available before the lease wait expired",
+            );
           } else if (error instanceof PoolClosedError) {
-            sendJson(response, 503, { error: "pool_shutting_down" });
+            sendCapacityError(
+              response,
+              503,
+              pool,
+              "pool_shutting_down",
+              "The AgentSlicer pool is shutting down",
+            );
           } else {
             throw error;
           }
@@ -249,6 +414,21 @@ export function createAgentPoolHttpServer(
       }
 
       const releaseMatch = /^\/leases\/([0-9a-f-]+)$/.exec(path);
+      if (releaseMatch !== null && request.method === "PATCH") {
+        const token = bearerToken(request);
+        const leaseId = releaseMatch[1]!;
+        const lease = token === undefined ? undefined : pool.renew(token, leaseId);
+        if (lease === undefined) {
+          sendJson(response, 401, { error: "invalid_or_expired_lease" });
+          return;
+        }
+        sendJson(response, 200, {
+          lease_id: lease.leaseId,
+          expires_at: lease.expiresAt.toISOString(),
+          renewed: true,
+        });
+        return;
+      }
       if (releaseMatch !== null && request.method === "DELETE") {
         const token = bearerToken(request);
         if (token === undefined || !await pool.release(token, releaseMatch[1])) {

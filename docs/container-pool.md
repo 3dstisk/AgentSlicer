@@ -26,7 +26,9 @@ gateway rewrites each proxied request to the worker's private bearer token.
 Immediately before assigning an idle worker, the pool checks that worker's
 `/readyz` endpoint. An unhealthy or unreachable worker is destroyed and the
 request continues waiting for a clean replacement instead of receiving a dead
-MCP endpoint.
+MCP endpoint. The pool also performs a final readiness probe after provisioning
+and before publishing a worker as available capacity; a container that fails
+that probe is never added to the ready queue.
 
 Each gateway owns workers through its stable `AGENT_SLICER_POOL_ID`. Before it
 warms the pool at startup, it force-removes containers carrying both its managed
@@ -59,6 +61,7 @@ The response contains a lease-specific token and relative routes:
   "expires_at": "2026-08-05T14:30:00.000Z",
   "mcp_path": "/mcp",
   "release_path": "/leases/6e6ce07a-24d5-46e6-bb09-ecfca7bc64a0",
+  "heartbeat_path": "/leases/6e6ce07a-24d5-46e6-bb09-ecfca7bc64a0",
   "required_headers": {
     "authorization": "Bearer <single-lease bearer token>"
   }
@@ -78,9 +81,19 @@ the gateway origin:
 ```
 
 Every proxied request refreshes the idle lease deadline. The default idle TTL is
-30 minutes. Continue polling long-running jobs so an active agent keeps its
-lease. A missing, expired, or released lease token receives `401` and can never
-reach a worker.
+30 minutes. For a long slice, continue polling `job_get` or explicitly renew the
+lease before its deadline:
+
+```http
+PATCH /leases/6e6ce07a-24d5-46e6-bb09-ecfca7bc64a0 HTTP/1.1
+Authorization: Bearer <single-lease bearer token>
+```
+
+The heartbeat returns the new `expires_at`. Heartbeats and polling use the same
+lease token, so a client can reconnect after an MCP transport interruption and
+resume `job_get` with the previously returned job ID. A transport disconnect
+does not release the lease or cancel an already-started slice. A missing,
+expired, or released lease token receives `401` and can never reach a worker.
 
 Release the lease when the agent is finished:
 
@@ -90,10 +103,36 @@ Authorization: Bearer <single-lease bearer token>
 ```
 
 The gateway immediately revokes routing, force-removes the worker and its
-anonymous volumes, and starts a clean replacement in the background. If every
+anonymous volumes, and starts a clean replacement in the background. If Docker
+cleanup fails, the revoked worker remains counted as unhealthy and destruction
+is retried at the configured retry interval; it is never returned to service.
+If every
 worker is leased, acquisition requests wait in a bounded FIFO queue. A full
-queue returns `429`; an acquisition timeout returns `503`. Both include
-`Retry-After: 5`.
+queue returns `429`; an acquisition timeout returns `503`. Both include a
+`Retry-After` header and a typed retryable response:
+
+```json
+{
+  "error": {
+    "code": "capacity_unavailable",
+    "message": "No healthy AgentSlicer worker became available before the lease wait expired"
+  },
+  "retryable": true,
+  "retryAfterMs": 5000,
+  "pool": {
+    "target": 2,
+    "ready": 0,
+    "leased": 2,
+    "starting": 0,
+    "unhealthy": 0,
+    "queued": 0
+  }
+}
+```
+
+Queue saturation uses the stable code `lease_queue_full`. MCP worker responses
+are proxied without rewriting their bodies, including a failed `job_get`
+snapshot's structured `{code,message,details}` error.
 
 ## Configuration
 
@@ -105,6 +144,7 @@ queue returns `429`; an acquisition timeout returns `503`. Both include
 | `AGENT_SLICER_POOL_MAX_QUEUE` | `100` | Maximum waiting lease requests. |
 | `AGENT_SLICER_POOL_ACQUIRE_WAIT_MS` | `60000` | Maximum server-side FIFO wait. |
 | `AGENT_SLICER_POOL_LEASE_TTL_MS` | `1800000` | Idle lease lifetime, refreshed by proxied traffic. |
+| `AGENT_SLICER_POOL_RETRY_DELAY_MS` | `5000` | Replacement retry delay and capacity-error `retryAfterMs`. |
 | `AGENT_SLICER_POOL_WORKER_IMAGE` | `ghcr.io/3dstisk/agentslicer:latest` | Disposable worker image. |
 | `AGENT_SLICER_POOL_NETWORK` | `agent-slicer-pool` | Private Docker network shared with workers. |
 | `AGENT_SLICER_POOL_DOCKER_SOCKET` | `/var/run/docker.sock` | Docker Engine Unix socket. |
@@ -114,9 +154,17 @@ queue returns `429`; an acquisition timeout returns `503`. Both include
 | `AGENT_SLICER_POOL_WORKER_ENV` | empty | Newline-delimited extra `NAME=value` worker settings. |
 
 `GET /livez` checks the gateway process. `GET /readyz` and `/healthz` report
-warm, leased, warming, and queued counts. Readiness stays healthy while existing
-leases can still be proxied, and `accepting_leases` reports whether a warm worker
-is immediately available.
+ready, leased, starting, unhealthy, and queued counts. Readiness stays healthy
+while existing leases can still be proxied, and `accepting_leases` reports
+whether a warm worker is immediately available.
+
+`GET /capacity` is a read-only, identifier-free capacity snapshot with the same
+safe counts, `acceptingLeases`, and `retryAfterMs`. `GET /metrics` exposes
+Prometheus metrics for lease wait duration, allocation failures, worker startup
+failures, worker reclamation reasons, and current worker states. Pool logs use
+structured JSON events for `lease_allocation_failed`, `worker_startup_failed`,
+and `worker_reclaimed`, allowing a capacity timeout to be correlated with its
+provisioning or readiness cause without exposing lease tokens.
 
 The pool intentionally does not proxy the browser desktop. Interactive desktop
 access should remain an operator-only endpoint on a specifically selected
