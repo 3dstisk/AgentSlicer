@@ -223,7 +223,8 @@ jobs:
 
   publish:
     name: Test and publish worker plus pool images
-    needs: [native-image, resolve-native-image]
+    needs: resolve-native-image
+    if: ${{ always() && !cancelled() && needs.resolve-native-image.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -375,3 +376,25 @@ jobs:
           labels: ${{ steps.pool_meta.outputs.labels }}
           cache-from: type=gha,scope=agent-slicer-pool
           cache-to: type=gha,mode=max,scope=agent-slicer-pool
+
+      - name: Verify published latest tags
+        if: github.event_name == 'push'
+        env:
+          POOL_LATEST_IMAGE: ghcr.io/${{ github.repository_owner }}/agentslicer-pool:latest
+          POOL_VERSION_IMAGE: ghcr.io/${{ github.repository_owner }}/agentslicer-pool:${{ steps.pool_meta.outputs.version }}
+          WORKER_LATEST_IMAGE: ghcr.io/${{ github.repository_owner }}/agentslicer:latest
+          WORKER_VERSION_IMAGE: ghcr.io/${{ github.repository_owner }}/agentslicer:${{ steps.meta.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          verify_latest() {
+            local version_image=$1
+            local latest_image=$2
+            local version_digest latest_digest
+            version_digest=$(docker buildx imagetools inspect "$version_image" --format '{{json .Manifest.Digest}}' | tr -d '"')
+            latest_digest=$(docker buildx imagetools inspect "$latest_image" --format '{{json .Manifest.Digest}}' | tr -d '"')
+            [[ "$version_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            test "$latest_digest" = "$version_digest"
+          }
+          verify_latest "$WORKER_VERSION_IMAGE" "$WORKER_LATEST_IMAGE"
+          verify_latest "$POOL_VERSION_IMAGE" "$POOL_LATEST_IMAGE"
