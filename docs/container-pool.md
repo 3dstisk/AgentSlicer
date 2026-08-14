@@ -3,7 +3,7 @@
 One OrcaSlicer process has one active project and one mutable preset/configuration
 state. Multiple agents therefore must not share a container. The AgentSlicer pool
 gateway grants each lease exclusive access to one of three fixed worker
-containers. The workers are ordinary Compose/Swarm services and are already
+containers. The workers are ordinary Swarm services and are already
 running before the gateway accepts work; the gateway never creates containers
 through the Docker Engine API.
 
@@ -13,20 +13,17 @@ only for agents in the same trust boundary, and have every job import its full
 project and apply the required presets/settings. Restart the three worker
 services when a clean application state is required.
 
-## Start a local pool
+## Deploy the pool
 
-The worker image must already exist on the Docker host. Generate a strong pool
-management token, then start the gateway:
+Use `portainer-stack.yaml` for the gateway and its three fixed workers. Before
+deploying it in Portainer:
 
-```bash
-export AGENT_SLICER_POOL_TOKEN="$(openssl rand -hex 32)"
-export AGENT_SLICER_POOL_WORKER_TOKEN="$(openssl rand -hex 32)"
-export AGENT_SLICER_POOL_ID=local
-export AGENT_SLICER_IMAGE=ghcr.io/3dstisk/agentslicer:latest
-docker compose -f compose.pool.yaml up --build -d
-```
+- replace `CHANGE_ME_LONG_RANDOM_POOL_TOKEN` with the external management token;
+- replace `CHANGE_ME_LONG_RANDOM_WORKER_TOKEN` with a different internal token;
+- configure Portainer with authenticated GHCR access; and
+- ensure the external `nginx-proxy-public` network exists.
 
-Compose starts `agent-slicer-worker-1`, `agent-slicer-worker-2`, and
+The stack starts `agent-slicer-worker-1`, `agent-slicer-worker-2`, and
 `agent-slicer-worker-3` on the private `agent-slicer-pool` network. The gateway
 has no Docker socket mount. It registers the configured worker URLs, waits for
 their `/readyz` endpoints, and rewrites proxied requests to the shared internal
@@ -131,7 +128,7 @@ snapshot's structured `{code,message,details}` error.
 | --- | --- | --- |
 | `AGENT_SLICER_POOL_TOKEN` | required | Management bearer token used only by `POST /leases`. |
 | `AGENT_SLICER_POOL_ID` | `default` | Stable identifier included in gateway logs. |
-| `AGENT_SLICER_POOL_WORKERS` | three Compose worker origins | Comma-delimited fixed worker HTTP origins; the entry count is the pool size. |
+| `AGENT_SLICER_POOL_WORKERS` | three worker origins | Comma-delimited fixed worker HTTP origins; the entry count is the pool size. |
 | `AGENT_SLICER_POOL_WORKER_TOKEN` | required | Internal bearer token configured identically on every fixed worker. |
 | `AGENT_SLICER_POOL_MAX_QUEUE` | `100` | Maximum waiting lease requests. |
 | `AGENT_SLICER_POOL_ACQUIRE_WAIT_MS` | `60000` | Maximum server-side FIFO wait. |

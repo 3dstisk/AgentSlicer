@@ -72,13 +72,17 @@ the MCP layer:
 docker build --platform linux/amd64 \
   -t agent-slicer-native:dev \
   -f docker/agent-native/Dockerfile .
-ORCASLICER_NATIVE_IMAGE=agent-slicer-native:dev \
-  docker compose -f compose.yaml -f compose.build.yaml build
-docker compose -f compose.yaml -f compose.build.yaml up -d
+docker build --platform linux/amd64 \
+  --build-arg ORCASLICER_NATIVE_IMAGE=agent-slicer-native:dev \
+  --build-arg BUILD_VERSION=dev \
+  --build-arg BUILD_REVISION=local \
+  -t agent-slicer:dev \
+  -f docker/agent-slicer/Dockerfile .
+AGENT_SLICER_IMAGE=agent-slicer:dev ./scripts/agent-slicer-up
 ```
 
 `GET /livez` checks the MCP process. `GET /readyz` and `GET /healthz` require
-the native Orca bridge to be ready. Compose waits on `/readyz`. Override
+the native Orca bridge to be ready. The startup script waits on `/readyz`. Override
 `AGENT_SLICER_ALLOWED_HOSTS` or `AGENT_SLICER_ALLOWED_ORIGINS` only when placing
 the localhost service behind a trusted proxy.
 
@@ -103,6 +107,6 @@ allowlists. Protect the browser desktop with the LinuxServer `CUSTOM_USER` and
 
 The runtime base is the verified LinuxServer OrcaSlicer `v2.4.2-ls31` amd64
 manifest (`sha256:3d5adaa318c6451f1b67f5efb0135a3e39ffebeefe8c013af1766c9f0335aba5`).
-If startup times out, inspect `docker compose logs orcaslicer`; `/livez` isolates
+If startup times out, inspect `docker logs agent-slicer-orca`; `/livez` isolates
 the MCP process, while a failing `/readyz` usually means Orca is still starting,
 the GUI is blocked by a dialog, or the native Unix socket is unavailable.

@@ -66,113 +66,11 @@ x-agent-slicer-worker: &agent-slicer-worker
 # Portainer Docker Swarm stack for the AgentSlicer fixed worker pool.
 #
 # Before deployment:
-# 1. Replace all five CHANGE_ME values.
+# 1. Replace both CHANGE_ME token values.
 # 2. The pool token must contain at least 48 random characters.
 # 3. Configure the same pool token as AGENT_SLICER_POOL_TOKEN in Email Assistant and AI Ops.
 # 4. Configure AGENT_SLICER_POOL_URL=https://agent-slicer.3dstisk.com in both apps.
 services:
-  agent-slicer-desktop:
-    # This persistent instance is only for the operator browser desktop. Agent
-    # integrations use the separate pool service below.
-    image: ghcr.io/3dstisk/agentslicer:latest
-    environment:
-      PUID: "1000"
-      PGID: "1000"
-      TZ: Europe/Prague
-
-      PIXELFLUX_WAYLAND: "false"
-      SELKIES_MANUAL_WIDTH: "1920"
-      SELKIES_MANUAL_HEIGHT: "1080"
-      MAX_RES: 1920x1080
-      SELKIES_SCALING_DPI: "96"
-      TITLE: AgentSlicer
-      LIBGL_ALWAYS_SOFTWARE: "1"
-      GALLIUM_DRIVER: llvmpipe
-      DISABLE_ZINK: "true"
-      HARDEN_DESKTOP: "true"
-      START_DOCKER: "false"
-      SELKIES_FILE_TRANSFERS: none
-      SELKIES_COMMAND_ENABLED: "false"
-      SELKIES_ENABLE_SHARING: "false"
-
-      CUSTOM_USER: 'CHANGE_ME_AGENT_SLICER_USER'
-      PASSWORD: 'CHANGE_ME_AGENT_SLICER_PASSWORD'
-
-      # The desktop's MCP port remains private but must still use a strong token.
-      AGENT_SLICER_MCP_HOST: 0.0.0.0
-      AGENT_SLICER_MCP_PORT: "8765"
-      AGENT_SLICER_TOKEN: 'CHANGE_ME_LONG_RANDOM_DESKTOP_MCP_TOKEN'
-      AGENT_SLICER_ALLOWED_HOSTS: localhost,127.0.0.1,[::1]
-      AGENT_SLICER_ALLOWED_ORIGINS: localhost,127.0.0.1,[::1]
-      AGENT_SLICER_BRIDGE_SOCKET: /run/agent-slicer/orca-agent.sock
-      AGENT_SLICER_MAX_IMPORT_BYTES: "536870912"
-      AGENT_SLICER_MAX_UPLOAD_BYTES: "536870912"
-      AGENT_SLICER_UPLOAD_TTL_MS: "900000"
-      AGENT_SLICER_SCREENSHOT_ROOTS: /screenshots/mcp
-      AGENT_SLICER_DESKTOP_SCREENSHOT_ROOT: /screenshots
-      AGENT_SLICER_CAPTURE_EXECUTABLE: /usr/local/bin/capture-orca
-
-    volumes:
-      - agent-slicer-config:/config
-      - agent-slicer-workspace:/workspace
-      - agent-slicer-screenshots:/screenshots
-      - agent-slicer-outputs:/outputs
-      - type: tmpfs
-        target: /dev/shm
-        tmpfs:
-          size: 1073741824
-
-    networks:
-      - nginx-proxy-public
-
-    healthcheck:
-      test:
-        - CMD
-        - curl
-        - --fail
-        - --silent
-        - --show-error
-        - --max-time
-        - "5"
-        - http://127.0.0.1:8765/readyz
-      interval: 10s
-      timeout: 7s
-      retries: 12
-      start_period: 120s
-
-    stop_grace_period: 60s
-
-    deploy:
-      mode: replicated
-      replicas: 1
-      placement:
-        constraints:
-          - node.role == manager
-          - node.platform.arch == x86_64
-      restart_policy:
-        condition: on-failure
-        delay: 10s
-        max_attempts: 3
-        window: 180s
-      update_config:
-        parallelism: 1
-        order: stop-first
-        monitor: 180s
-        failure_action: rollback
-      rollback_config:
-        parallelism: 1
-        order: stop-first
-        monitor: 180s
-      labels:
-        - "traefik.enable=true"
-        - "traefik.http.routers.3dstisk_agent_slicer_desktop.rule=Host(`agent-slicer.3dstisk.com`)"
-        - "traefik.http.routers.3dstisk_agent_slicer_desktop.entrypoints=websecure"
-        - "traefik.http.routers.3dstisk_agent_slicer_desktop.tls=true"
-        - "traefik.http.routers.3dstisk_agent_slicer_desktop.priority=10"
-        - "traefik.http.routers.3dstisk_agent_slicer_desktop.service=3dstisk_agent_slicer_desktop"
-        - "traefik.http.services.3dstisk_agent_slicer_desktop.loadbalancer.server.port=3000"
-        - "traefik.swarm.network=nginx-proxy-public"
-
   agent-slicer-pool:
     # The pool image manages leases across the three fixed worker services.
     image: ghcr.io/3dstisk/agentslicer-pool:latest
@@ -253,16 +151,6 @@ services:
 
   agent-slicer-worker-3:
     <<: *agent-slicer-worker
-
-volumes:
-  agent-slicer-config:
-    driver: local
-  agent-slicer-workspace:
-    driver: local
-  agent-slicer-screenshots:
-    driver: local
-  agent-slicer-outputs:
-    driver: local
 
 networks:
   # The gateway and its three fixed workers share this fixed-name,

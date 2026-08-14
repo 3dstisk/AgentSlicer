@@ -313,7 +313,7 @@ jobs:
           mkdir -p runtime/workspace runtime/e2e-artifacts runtime/outputs
           cleanup() {
             status=$?
-            docker compose -f compose.yaml logs --no-color > runtime/e2e-artifacts/docker-compose.log 2>&1 || true
+            docker logs agent-slicer-orca > runtime/e2e-artifacts/container.log 2>&1 || true
             ./scripts/agent-slicer-down || true
             exit "$status"
           }
