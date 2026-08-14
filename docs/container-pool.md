@@ -1,10 +1,17 @@
-# AgentSlicer warm container pool
+# AgentSlicer fixed worker pool
 
 One OrcaSlicer process has one active project and one mutable preset/configuration
 state. Multiple agents therefore must not share a container. The AgentSlicer pool
-gateway keeps disposable containers warm, grants each lease exclusive access to
-one container, and destroys that container on release or idle expiry. A released
-container is never assigned to another agent.
+gateway grants each lease exclusive access to one of three fixed worker
+containers. The workers are ordinary Compose/Swarm services and are already
+running before the gateway accepts work; the gateway never creates containers
+through the Docker Engine API.
+
+The fixed workers are reused after release. Their OrcaSlicer project and preset
+state is therefore not automatically reset between leases. Use this deployment
+only for agents in the same trust boundary, and have every job import its full
+project and apply the required presets/settings. Restart the three worker
+services when a clean application state is required.
 
 ## Start a local pool
 
@@ -13,32 +20,19 @@ management token, then start the gateway:
 
 ```bash
 export AGENT_SLICER_POOL_TOKEN="$(openssl rand -hex 32)"
-export AGENT_SLICER_POOL_SIZE=2
+export AGENT_SLICER_POOL_WORKER_TOKEN="$(openssl rand -hex 32)"
 export AGENT_SLICER_POOL_ID=local
 export AGENT_SLICER_IMAGE=ghcr.io/3dstisk/agentslicer:latest
 docker compose -f compose.pool.yaml up --build -d
 ```
 
-The gateway uses the Docker Engine socket to create and destroy workers on the
-private `agent-slicer-pool` network. Workers have anonymous writable state only:
-no workspace, output, screenshot, or Orca configuration volume is shared. The
-gateway rewrites each proxied request to the worker's private bearer token.
-Immediately before assigning an idle worker, the pool checks that worker's
-`/readyz` endpoint. An unhealthy or unreachable worker is destroyed and the
-request continues waiting for a clean replacement instead of receiving a dead
-MCP endpoint. The pool also performs a final readiness probe after provisioning
-and before publishing a worker as available capacity; a container that fails
-that probe is never added to the ready queue.
-
-Each gateway owns workers through its stable `AGENT_SLICER_POOL_ID`. Before it
-warms the pool at startup, it force-removes containers carrying both its managed
-label and that pool ID. This reclaims workers orphaned by a gateway crash without
-touching workers owned by another pool. Every concurrently running gateway on a
-Docker host must use a unique pool ID; reuse the same ID when restarting that
-gateway so recovery can find its earlier workers.
-
-Mounting `/var/run/docker.sock` grants Docker-host control. Run the pool gateway
-only as a trusted infrastructure component, never as tenant-supplied code.
+Compose starts `agent-slicer-worker-1`, `agent-slicer-worker-2`, and
+`agent-slicer-worker-3` on the private `agent-slicer-pool` network. The gateway
+has no Docker socket mount. It registers the configured worker URLs, waits for
+their `/readyz` endpoints, and rewrites proxied requests to the shared internal
+worker token. It also probes a worker immediately before assigning it. An
+unhealthy worker remains out of circulation and is retried until its service is
+healthy again.
 
 ## Acquire and use a lease
 
@@ -102,12 +96,9 @@ DELETE /leases/6e6ce07a-24d5-46e6-bb09-ecfca7bc64a0 HTTP/1.1
 Authorization: Bearer <single-lease bearer token>
 ```
 
-The gateway immediately revokes routing, force-removes the worker and its
-anonymous volumes, and starts a clean replacement in the background. If Docker
-cleanup fails, the revoked worker remains counted as unhealthy and destruction
-is retried at the configured retry interval; it is never returned to service.
-If every
-worker is leased, acquisition requests wait in a bounded FIFO queue. A full
+The gateway immediately revokes routing and rechecks the fixed worker before
+returning it to the ready set. If every worker is leased, acquisition requests
+wait in a bounded FIFO queue. A full
 queue returns `429`; an acquisition timeout returns `503`. Both include a
 `Retry-After` header and a typed retryable response:
 
@@ -120,9 +111,9 @@ queue returns `429`; an acquisition timeout returns `503`. Both include a
   "retryable": true,
   "retryAfterMs": 5000,
   "pool": {
-    "target": 2,
+    "target": 3,
     "ready": 0,
-    "leased": 2,
+    "leased": 3,
     "starting": 0,
     "unhealthy": 0,
     "queued": 0
@@ -139,19 +130,13 @@ snapshot's structured `{code,message,details}` error.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `AGENT_SLICER_POOL_TOKEN` | required | Management bearer token used only by `POST /leases`. |
-| `AGENT_SLICER_POOL_ID` | `default` | Stable worker owner ID; unique per concurrently running gateway. |
-| `AGENT_SLICER_POOL_SIZE` | `2` | Total warm plus leased workers. |
+| `AGENT_SLICER_POOL_ID` | `default` | Stable identifier included in gateway logs. |
+| `AGENT_SLICER_POOL_WORKERS` | three Compose worker origins | Comma-delimited fixed worker HTTP origins; the entry count is the pool size. |
+| `AGENT_SLICER_POOL_WORKER_TOKEN` | required | Internal bearer token configured identically on every fixed worker. |
 | `AGENT_SLICER_POOL_MAX_QUEUE` | `100` | Maximum waiting lease requests. |
 | `AGENT_SLICER_POOL_ACQUIRE_WAIT_MS` | `60000` | Maximum server-side FIFO wait. |
 | `AGENT_SLICER_POOL_LEASE_TTL_MS` | `1800000` | Idle lease lifetime, refreshed by proxied traffic. |
-| `AGENT_SLICER_POOL_RETRY_DELAY_MS` | `5000` | Replacement retry delay and capacity-error `retryAfterMs`. |
-| `AGENT_SLICER_POOL_WORKER_IMAGE` | `ghcr.io/3dstisk/agentslicer:latest` | Disposable worker image. |
-| `AGENT_SLICER_POOL_NETWORK` | `agent-slicer-pool` | Private Docker network shared with workers. |
-| `AGENT_SLICER_POOL_DOCKER_SOCKET` | `/var/run/docker.sock` | Docker Engine Unix socket. |
-| `AGENT_SLICER_POOL_DOCKER_API_VERSION` | negotiated (up to `1.44`) | Optional fixed Docker Engine API version; setting it disables negotiation. |
-| `AGENT_SLICER_POOL_WORKER_READY_TIMEOUT_MS` | `180000` | Worker `/readyz` startup deadline. |
-| `AGENT_SLICER_POOL_WORKER_SHM_BYTES` | `1073741824` | Per-worker `/dev/shm` size. |
-| `AGENT_SLICER_POOL_WORKER_ENV` | empty | Newline-delimited extra `NAME=value` worker settings. |
+| `AGENT_SLICER_POOL_RETRY_DELAY_MS` | `5000` | Unhealthy-worker retry delay and capacity-error `retryAfterMs`. |
 
 `GET /livez` checks the gateway process. `GET /readyz` and `/healthz` report
 ready, leased, starting, unhealthy, and queued counts. Readiness stays healthy
@@ -166,6 +151,7 @@ structured JSON events for `lease_allocation_failed`, `worker_startup_failed`,
 and `worker_reclaimed`, allowing a capacity timeout to be correlated with its
 provisioning or readiness cause without exposing lease tokens.
 
-The pool intentionally does not proxy the browser desktop. Interactive desktop
-access should remain an operator-only endpoint on a specifically selected
-worker, not a tenant routing surface.
+To change capacity, add or remove explicit worker services and update
+`AGENT_SLICER_POOL_WORKERS` to match. The pool intentionally does not proxy the
+browser desktop. Interactive desktop access should remain an operator-only
+endpoint on a specifically selected worker, not a tenant routing surface.

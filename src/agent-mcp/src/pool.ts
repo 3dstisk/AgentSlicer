@@ -9,7 +9,7 @@ export interface PoolWorker {
 export interface WorkerProvisioner {
   provision(): Promise<PoolWorker>;
   healthy(worker: PoolWorker): Promise<boolean>;
-  destroy(worker: PoolWorker): Promise<void>;
+  reclaim(worker: PoolWorker): Promise<void>;
 }
 
 export interface WorkerLease {
@@ -367,7 +367,7 @@ export class WarmWorkerPool {
     ].map((worker) => [worker.id, worker])).values()];
     this.workers.clear();
     await Promise.allSettled([
-      ...workers.map((worker) => this.provisioner.destroy(worker)),
+      ...workers.map((worker) => this.provisioner.reclaim(worker)),
       ...this.warmOperations,
     ]);
   }
@@ -474,18 +474,18 @@ export class WarmWorkerPool {
     try {
       const worker = await this.provisioner.provision();
       if (this.closed) {
-        await this.provisioner.destroy(worker);
+        await this.provisioner.reclaim(worker);
         return;
       }
       if (this.workers.has(worker.id)) {
-        await this.provisioner.destroy(worker);
+        await this.provisioner.reclaim(worker);
         throw new Error(`Provisioner returned duplicate worker id: ${worker.id}`);
       }
       this.workers.set(worker.id, worker);
       const healthy = await this.workerHealthy(worker);
       if (this.closed) {
         this.workers.delete(worker.id);
-        await this.provisioner.destroy(worker);
+        await this.provisioner.reclaim(worker);
         return;
       }
       if (!healthy) {
@@ -507,8 +507,8 @@ export class WarmWorkerPool {
       this.log({
         level: "error",
         event: "worker_startup_failed",
-        message: error instanceof Error ? error.message : "AgentSlicer worker startup failed",
-        reason: "provision_failed",
+        message: error instanceof Error ? error.message : "AgentSlicer worker registration failed",
+        reason: "registration_failed",
       });
       this.scheduleRetry();
     } finally {
@@ -550,7 +550,7 @@ export class WarmWorkerPool {
     this.pendingReclaims.set(worker.id, reclaim);
     this.unhealthyWorkers.add(worker.id);
     try {
-      await this.provisioner.destroy(worker);
+      await this.provisioner.reclaim(worker);
     } catch (error) {
       ++this.workerReclamationFailures;
       this.log({
@@ -580,7 +580,7 @@ export class WarmWorkerPool {
         ? "warn"
         : "info",
       event: "worker_reclaimed",
-      message: "AgentSlicer worker was destroyed and removed from the pool",
+      message: "AgentSlicer worker was reclaimed from the pool",
       reason,
       workerId: worker.id,
       ...(leaseId !== undefined ? { leaseId } : {}),

@@ -1,5 +1,4 @@
 import { isIP } from "node:net";
-import { resolve } from "node:path";
 
 export interface AgentPoolConfig {
   bindHost: string;
@@ -13,33 +12,9 @@ export interface AgentPoolConfig {
   acquireWaitMs: number;
   leaseTtlMs: number;
   retryDelayMs: number;
-  dockerSocketPath: string;
-  dockerApiVersion?: string;
-  workerImage: string;
-  workerNetwork: string;
-  workerMcpPort: number;
-  workerReadyTimeoutMs: number;
-  workerReadyPollMs: number;
-  workerShmBytes: number;
-  workerEnvironment: readonly string[];
-  timezone: string;
+  workerUrls: readonly URL[];
+  workerToken: string;
 }
-
-const RESERVED_WORKER_ENVIRONMENT = new Set([
-  "PUID",
-  "PGID",
-  "TZ",
-  "AGENT_SLICER_MCP_HOST",
-  "AGENT_SLICER_MCP_PORT",
-  "AGENT_SLICER_TOKEN",
-  "AGENT_SLICER_ALLOWED_HOSTS",
-  "AGENT_SLICER_ALLOWED_ORIGINS",
-  "HARDEN_DESKTOP",
-  "START_DOCKER",
-  "SELKIES_FILE_TRANSFERS",
-  "SELKIES_COMMAND_ENABLED",
-  "SELKIES_ENABLE_SHARING",
-]);
 
 function integer(
   value: string | undefined,
@@ -55,14 +30,6 @@ function integer(
   return parsed;
 }
 
-function absolutePath(value: string, name: string): string {
-  const normalized = resolve(value);
-  if (normalized !== value) {
-    throw new Error(`${name} must be an absolute normalized path`);
-  }
-  return normalized;
-}
-
 function csv(value: string, name: string): string[] {
   const entries = value.split(",").map((entry) => entry.trim()).filter(Boolean);
   if (entries.length === 0) {
@@ -71,15 +38,31 @@ function csv(value: string, name: string): string[] {
   return entries;
 }
 
-function dockerApiVersion(value: string | undefined): string | undefined {
-  const normalized = value?.trim();
-  if (normalized === undefined || normalized.length === 0) {
-    return undefined;
+function workerUrls(value: string | undefined): URL[] {
+  const entries = csv(
+    value ?? "http://agent-slicer-worker-1:8765,http://agent-slicer-worker-2:8765,http://agent-slicer-worker-3:8765",
+    "AGENT_SLICER_POOL_WORKERS",
+  );
+  const urls = entries.map((entry) => {
+    let url: URL;
+    try {
+      url = new URL(entry);
+    } catch {
+      throw new Error("AGENT_SLICER_POOL_WORKERS must contain comma-delimited absolute URLs");
+    }
+    if (url.protocol !== "http:" || url.username !== "" || url.password !== "" ||
+        url.pathname !== "/" || url.search !== "" || url.hash !== "") {
+      throw new Error("AGENT_SLICER_POOL_WORKERS URLs must be plain HTTP origins");
+    }
+    return url;
+  });
+  if (urls.length > 100) {
+    throw new Error("AGENT_SLICER_POOL_WORKERS must contain at most 100 URLs");
   }
-  if (!/^\d+\.\d+$/.test(normalized)) {
-    throw new Error("AGENT_SLICER_POOL_DOCKER_API_VERSION must use major.minor format");
+  if (new Set(urls.map((url) => url.href)).size !== urls.length) {
+    throw new Error("AGENT_SLICER_POOL_WORKERS must not contain duplicate URLs");
   }
-  return normalized;
+  return urls;
 }
 
 function isLoopback(host: string): boolean {
@@ -105,16 +88,10 @@ export function loadPoolConfig(env: NodeJS.ProcessEnv = process.env): AgentPoolC
       "AGENT_SLICER_POOL_ID must be 1-63 letters, digits, dots, underscores, or hyphens",
     );
   }
-  const workerEnvironment = (env.AGENT_SLICER_POOL_WORKER_ENV ?? "")
-    .split("\n")
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-  if (workerEnvironment.some((entry) => !/^[A-Z_][A-Z0-9_]*=/.test(entry))) {
-    throw new Error("AGENT_SLICER_POOL_WORKER_ENV must contain newline-delimited NAME=value entries");
-  }
-  if (workerEnvironment.some((entry) =>
-    RESERVED_WORKER_ENVIRONMENT.has(entry.slice(0, entry.indexOf("="))))) {
-    throw new Error("AGENT_SLICER_POOL_WORKER_ENV must not override pool-managed settings");
+  const configuredWorkerUrls = workerUrls(env.AGENT_SLICER_POOL_WORKERS);
+  const workerToken = env.AGENT_SLICER_POOL_WORKER_TOKEN;
+  if (workerToken === undefined || workerToken.length < 32) {
+    throw new Error("AGENT_SLICER_POOL_WORKER_TOKEN must contain at least 32 characters");
   }
 
   return {
@@ -130,7 +107,7 @@ export function loadPoolConfig(env: NodeJS.ProcessEnv = process.env): AgentPoolC
       env.AGENT_SLICER_POOL_ALLOWED_ORIGINS ?? "localhost,127.0.0.1,[::1]",
       "AGENT_SLICER_POOL_ALLOWED_ORIGINS",
     ),
-    poolSize: integer(env.AGENT_SLICER_POOL_SIZE, 2, "AGENT_SLICER_POOL_SIZE", 1, 100),
+    poolSize: configuredWorkerUrls.length,
     maxQueue: integer(env.AGENT_SLICER_POOL_MAX_QUEUE, 100, "AGENT_SLICER_POOL_MAX_QUEUE", 0, 10_000),
     acquireWaitMs: integer(
       env.AGENT_SLICER_POOL_ACQUIRE_WAIT_MS,
@@ -153,42 +130,7 @@ export function loadPoolConfig(env: NodeJS.ProcessEnv = process.env): AgentPoolC
       100,
       60_000,
     ),
-    dockerSocketPath: absolutePath(
-      env.AGENT_SLICER_POOL_DOCKER_SOCKET ?? "/var/run/docker.sock",
-      "AGENT_SLICER_POOL_DOCKER_SOCKET",
-    ),
-    dockerApiVersion: dockerApiVersion(env.AGENT_SLICER_POOL_DOCKER_API_VERSION),
-    workerImage: env.AGENT_SLICER_POOL_WORKER_IMAGE ?? "ghcr.io/3dstisk/agentslicer:latest",
-    workerNetwork: env.AGENT_SLICER_POOL_NETWORK ?? "agent-slicer-pool",
-    workerMcpPort: integer(
-      env.AGENT_SLICER_POOL_WORKER_MCP_PORT,
-      8765,
-      "AGENT_SLICER_POOL_WORKER_MCP_PORT",
-      1,
-      65_535,
-    ),
-    workerReadyTimeoutMs: integer(
-      env.AGENT_SLICER_POOL_WORKER_READY_TIMEOUT_MS,
-      180_000,
-      "AGENT_SLICER_POOL_WORKER_READY_TIMEOUT_MS",
-      1_000,
-      15 * 60_000,
-    ),
-    workerReadyPollMs: integer(
-      env.AGENT_SLICER_POOL_WORKER_READY_POLL_MS,
-      1_000,
-      "AGENT_SLICER_POOL_WORKER_READY_POLL_MS",
-      100,
-      30_000,
-    ),
-    workerShmBytes: integer(
-      env.AGENT_SLICER_POOL_WORKER_SHM_BYTES,
-      1024 * 1024 * 1024,
-      "AGENT_SLICER_POOL_WORKER_SHM_BYTES",
-      64 * 1024 * 1024,
-      16 * 1024 * 1024 * 1024,
-    ),
-    workerEnvironment,
-    timezone: env.TZ ?? "UTC",
+    workerUrls: configuredWorkerUrls,
+    workerToken,
   };
 }

@@ -1,23 +1,12 @@
-import { DockerEngineClient, DockerWorkerProvisioner } from "./docker-engine.js";
 import { loadPoolConfig } from "./pool-config.js";
 import { WarmWorkerPool } from "./pool.js";
 import { createAgentPoolHttpServer } from "./pool-server.js";
+import { StaticWorkerProvisioner } from "./static-workers.js";
 
 const config = loadPoolConfig();
-const docker = new DockerEngineClient({
-  socketPath: config.dockerSocketPath,
-  apiVersion: config.dockerApiVersion,
-});
-const provisioner = new DockerWorkerProvisioner(docker, {
-  image: config.workerImage,
-  network: config.workerNetwork,
-  poolId: config.poolId,
-  mcpPort: config.workerMcpPort,
-  readyTimeoutMs: config.workerReadyTimeoutMs,
-  readyPollMs: config.workerReadyPollMs,
-  shmBytes: config.workerShmBytes,
-  timezone: config.timezone,
-  workerEnvironment: config.workerEnvironment,
+const provisioner = new StaticWorkerProvisioner({
+  workerUrls: config.workerUrls,
+  bearerToken: config.workerToken,
 });
 const pool = new WarmWorkerPool(provisioner, {
   size: config.poolSize,
@@ -30,7 +19,6 @@ const pool = new WarmWorkerPool(provisioner, {
   })}\n`),
 });
 
-const reconciledWorkers = await provisioner.reconcile();
 await pool.start();
 const http = createAgentPoolHttpServer(config, pool);
 http.server.listen(config.port, config.bindHost, () => {
@@ -40,7 +28,7 @@ http.server.listen(config.port, config.bindHost, () => {
     host: config.bindHost,
     port: config.port,
     pool_id: config.poolId,
-    reconciled_workers: reconciledWorkers,
+    configured_workers: config.workerUrls.length,
     pool: pool.stats(),
   })}\n`);
 });

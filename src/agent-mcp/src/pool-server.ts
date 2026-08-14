@@ -127,13 +127,13 @@ function prometheusMetrics(pool: WarmWorkerPool): string {
     "# HELP agent_slicer_pool_allocation_failures_total Failed worker lease allocations.",
     "# TYPE agent_slicer_pool_allocation_failures_total counter",
     metricLabels("agent_slicer_pool_allocation_failures_total", allocationFailures),
-    "# HELP agent_slicer_pool_worker_startup_failures_total Workers that failed provisioning or final readiness.",
+    "# HELP agent_slicer_pool_worker_startup_failures_total Workers that failed registration or final readiness.",
     "# TYPE agent_slicer_pool_worker_startup_failures_total counter",
     `agent_slicer_pool_worker_startup_failures_total ${metrics.workerStartupFailures}`,
-    "# HELP agent_slicer_pool_worker_reclamations_total Workers destroyed after lease or health lifecycle events.",
+    "# HELP agent_slicer_pool_worker_reclamations_total Workers reclaimed after lease or health lifecycle events.",
     "# TYPE agent_slicer_pool_worker_reclamations_total counter",
     metricLabels("agent_slicer_pool_worker_reclamations_total", reclamations),
-    "# HELP agent_slicer_pool_worker_reclamation_failures_total Failed worker destruction attempts.",
+    "# HELP agent_slicer_pool_worker_reclamation_failures_total Failed worker reclamation attempts.",
     "# TYPE agent_slicer_pool_worker_reclamation_failures_total counter",
     `agent_slicer_pool_worker_reclamation_failures_total ${metrics.workerReclamationFailures}`,
   ];
@@ -435,7 +435,7 @@ export function createAgentPoolHttpServer(
           sendJson(response, 401, { error: "invalid_or_expired_lease" });
           return;
         }
-        sendJson(response, 202, { released: true, replacement_warming: true });
+        sendJson(response, 202, { released: true, worker_rechecking: true });
         return;
       }
 

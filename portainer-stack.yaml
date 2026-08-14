@@ -1,9 +1,72 @@
-version: "3.8"
+x-agent-slicer-worker-token: &agent-slicer-worker-token 'CHANGE_ME_LONG_RANDOM_WORKER_TOKEN'
 
-# Portainer Docker Swarm stack for the AgentSlicer warm worker pool.
+x-agent-slicer-worker: &agent-slicer-worker
+  image: ghcr.io/3dstisk/agentslicer:latest
+  environment:
+    PUID: "1000"
+    PGID: "1000"
+    TZ: Europe/Prague
+    AGENT_SLICER_MCP_HOST: 0.0.0.0
+    AGENT_SLICER_MCP_PORT: "8765"
+    AGENT_SLICER_TOKEN: *agent-slicer-worker-token
+    AGENT_SLICER_ALLOWED_HOSTS: localhost,127.0.0.1,[::1]
+    AGENT_SLICER_ALLOWED_ORIGINS: localhost,127.0.0.1,[::1]
+    HARDEN_DESKTOP: "true"
+    START_DOCKER: "false"
+    SELKIES_FILE_TRANSFERS: none
+    SELKIES_COMMAND_ENABLED: "false"
+    SELKIES_ENABLE_SHARING: "false"
+    AGENT_SLICER_MAX_IMPORT_BYTES: "536870912"
+    AGENT_SLICER_MAX_UPLOAD_BYTES: "536870912"
+    AGENT_SLICER_UPLOAD_TTL_MS: "900000"
+    AGENT_SLICER_SCREENSHOT_ROOTS: /screenshots/mcp
+    AGENT_SLICER_DESKTOP_SCREENSHOT_ROOT: /screenshots
+    AGENT_SLICER_CAPTURE_EXECUTABLE: /usr/local/bin/capture-orca
+  networks:
+    - agent-slicer-pool
+  volumes:
+    - type: tmpfs
+      target: /dev/shm
+      tmpfs:
+        size: 1073741824
+  healthcheck:
+    test:
+      - CMD
+      - curl
+      - --fail
+      - --silent
+      - --show-error
+      - --max-time
+      - "5"
+      - http://127.0.0.1:8765/readyz
+    interval: 10s
+    timeout: 7s
+    retries: 12
+    start_period: 120s
+  stop_grace_period: 60s
+  deploy:
+    mode: replicated
+    replicas: 1
+    placement:
+      constraints:
+        - node.platform.arch == x86_64
+    restart_policy:
+      condition: any
+      delay: 10s
+    update_config:
+      parallelism: 1
+      order: stop-first
+      monitor: 180s
+      failure_action: rollback
+    rollback_config:
+      parallelism: 1
+      order: stop-first
+      monitor: 180s
+
+# Portainer Docker Swarm stack for the AgentSlicer fixed worker pool.
 #
 # Before deployment:
-# 1. Replace all four CHANGE_ME values.
+# 1. Replace all five CHANGE_ME values.
 # 2. The pool token must contain at least 48 random characters.
 # 3. Configure the same pool token as AGENT_SLICER_POOL_TOKEN in Email Assistant and AI Ops.
 # 4. Configure AGENT_SLICER_POOL_URL=https://agent-slicer.3dstisk.com in both apps.
@@ -111,8 +174,7 @@ services:
         - "traefik.swarm.network=nginx-proxy-public"
 
   agent-slicer-pool:
-    # The pool image manages leases. It creates disposable workers from the
-    # separate AgentSlicer image through the manager node's Docker socket.
+    # The pool image manages leases across the three fixed worker services.
     image: ghcr.io/3dstisk/agentslicer-pool:latest
     environment:
       TZ: Europe/Prague
@@ -123,34 +185,15 @@ services:
       AGENT_SLICER_POOL_ALLOWED_HOSTS: agent-slicer.3dstisk.com
       AGENT_SLICER_POOL_ALLOWED_ORIGINS: agent-slicer.3dstisk.com
 
-      # Two workers can serve two agents concurrently. Additional lease
+      # Three fixed workers can serve three agents concurrently. Additional lease
       # requests wait in the bounded FIFO queue.
-      AGENT_SLICER_POOL_SIZE: "2"
       AGENT_SLICER_POOL_MAX_QUEUE: "100"
       AGENT_SLICER_POOL_ACQUIRE_WAIT_MS: "60000"
       AGENT_SLICER_POOL_LEASE_TTL_MS: "1800000"
       AGENT_SLICER_POOL_RETRY_DELAY_MS: "5000"
 
-      # Docker Engine 29+ no longer accepts the pool image's former 1.43 default.
-      AGENT_SLICER_POOL_DOCKER_API_VERSION: "1.44"
-      AGENT_SLICER_POOL_WORKER_IMAGE: ghcr.io/3dstisk/agentslicer:latest
-      AGENT_SLICER_POOL_NETWORK: agent-slicer-pool
-      AGENT_SLICER_POOL_WORKER_MCP_PORT: "8765"
-      AGENT_SLICER_POOL_WORKER_READY_TIMEOUT_MS: "180000"
-      AGENT_SLICER_POOL_WORKER_READY_POLL_MS: "1000"
-      AGENT_SLICER_POOL_WORKER_SHM_BYTES: "1073741824"
-      AGENT_SLICER_POOL_WORKER_ENV: |-
-        AGENT_SLICER_MAX_IMPORT_BYTES=536870912
-        AGENT_SLICER_MAX_UPLOAD_BYTES=536870912
-        AGENT_SLICER_UPLOAD_TTL_MS=900000
-        AGENT_SLICER_SCREENSHOT_ROOTS=/screenshots/mcp
-        AGENT_SLICER_DESKTOP_SCREENSHOT_ROOT=/screenshots
-        AGENT_SLICER_CAPTURE_EXECUTABLE=/usr/local/bin/capture-orca
-
-    # This service is trusted infrastructure. Docker socket access lets it
-    # create and destroy only its labelled disposable worker containers.
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
+      AGENT_SLICER_POOL_WORKERS: http://agent-slicer-worker-1:8765,http://agent-slicer-worker-2:8765,http://agent-slicer-worker-3:8765
+      AGENT_SLICER_POOL_WORKER_TOKEN: *agent-slicer-worker-token
 
     networks:
       - agent-slicer-pool
@@ -174,9 +217,6 @@ services:
       replicas: 1
       placement:
         constraints:
-          # The gateway must run on a manager because it uses that node's
-          # Docker Engine socket to manage standalone worker containers.
-          - node.role == manager
           - node.platform.arch == x86_64
       restart_policy:
         condition: on-failure
@@ -205,6 +245,15 @@ services:
         - "traefik.http.services.3dstisk_agent_slicer_pool.loadbalancer.server.port=8765"
         - "traefik.swarm.network=nginx-proxy-public"
 
+  agent-slicer-worker-1:
+    <<: *agent-slicer-worker
+
+  agent-slicer-worker-2:
+    <<: *agent-slicer-worker
+
+  agent-slicer-worker-3:
+    <<: *agent-slicer-worker
+
 volumes:
   agent-slicer-config:
     driver: local
@@ -216,7 +265,7 @@ volumes:
     driver: local
 
 networks:
-  # The gateway and its standalone disposable workers share this fixed-name,
+  # The gateway and its three fixed workers share this fixed-name,
   # attachable overlay network. It is not connected to Traefik.
   agent-slicer-pool:
     name: agent-slicer-pool

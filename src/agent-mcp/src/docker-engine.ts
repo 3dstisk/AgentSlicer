@@ -293,7 +293,7 @@ export class DockerWorkerProvisioner implements WorkerProvisioner {
     }
   }
 
-  async destroy(worker: PoolWorker): Promise<void> {
+  async reclaim(worker: PoolWorker): Promise<void> {
     await this.destroyById(worker.id);
   }
 

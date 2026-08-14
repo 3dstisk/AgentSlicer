@@ -17,6 +17,7 @@ import {
   type WorkerProvisioner,
 } from "../src/pool.js";
 import { createAgentPoolHttpServer, type AgentPoolHttpServer } from "../src/pool-server.js";
+import { StaticWorkerProvisioner } from "../src/static-workers.js";
 
 class FakeProvisioner implements WorkerProvisioner {
   nextId = 1;
@@ -37,7 +38,7 @@ class FakeProvisioner implements WorkerProvisioner {
     };
   }
 
-  async destroy(worker: PoolWorker): Promise<void> {
+  async reclaim(worker: PoolWorker): Promise<void> {
     this.destroyAttempts.push(worker.id);
     if (this.destroyFailures > 0) {
       --this.destroyFailures;
@@ -128,16 +129,8 @@ function poolConfig(overrides: Partial<AgentPoolConfig> = {}): AgentPoolConfig {
     acquireWaitMs: 1_000,
     leaseTtlMs: 60_000,
     retryDelayMs: 10,
-    dockerSocketPath: "/var/run/docker.sock",
-    dockerApiVersion: "1.43",
-    workerImage: "agent-slicer:test",
-    workerNetwork: "agent-slicer-pool",
-    workerMcpPort: 8765,
-    workerReadyTimeoutMs: 1_000,
-    workerReadyPollMs: 10,
-    workerShmBytes: 1024 * 1024 * 1024,
-    workerEnvironment: [],
-    timezone: "UTC",
+    workerUrls: [new URL("http://worker-1:8765")],
+    workerToken: "w".repeat(48),
     ...overrides,
   };
 }
@@ -777,12 +770,68 @@ describe("Docker worker provisioner", () => {
       `AGENT_SLICER_TOKEN=${worker.bearerToken}`,
     );
 
-    await provisioner.destroy(worker);
+    await provisioner.reclaim(worker);
     expect(calls).toContainEqual({
       method: "DELETE",
       path: "/containers/container-1?force=true&v=true",
       body: undefined,
     });
+  });
+});
+
+describe("static worker provisioner", () => {
+  it("claims configured workers without creating containers and reuses them after reclaim", async () => {
+    const provisioner = new StaticWorkerProvisioner({
+      workerUrls: [
+        new URL("http://worker-1:8765"),
+        new URL("http://worker-2:8765"),
+        new URL("http://worker-3:8765"),
+      ],
+      bearerToken: "backend-token",
+      checkReady: async () => true,
+    });
+
+    const workers = await Promise.all([
+      provisioner.provision(),
+      provisioner.provision(),
+      provisioner.provision(),
+    ]);
+    expect(workers.map((worker) => worker.baseUrl.href)).toEqual([
+      "http://worker-1:8765/",
+      "http://worker-2:8765/",
+      "http://worker-3:8765/",
+    ]);
+    await expect(provisioner.provision()).rejects.toThrow("No unclaimed static");
+    await expect(provisioner.healthy(workers[0]!)).resolves.toBe(true);
+
+    await provisioner.reclaim(workers[0]!);
+    const reclaimed = await provisioner.provision();
+    expect(reclaimed.id).toBe(workers[0]!.id);
+    expect(reclaimed.bearerToken).toBe("backend-token");
+  });
+
+  it("returns a released fixed worker to the lease pool", async () => {
+    const provisioner = new StaticWorkerProvisioner({
+      workerUrls: [new URL("http://worker-1:8765")],
+      bearerToken: "backend-token",
+      checkReady: async () => true,
+    });
+    const pool = new WarmWorkerPool(provisioner, {
+      size: 1,
+      leaseTtlMs: 60_000,
+      maxQueue: 1,
+      retryDelayMs: 10,
+    });
+    pools.push(pool);
+    await pool.start();
+
+    const first = await pool.acquire(0);
+    const nextLease = pool.acquire(1_000);
+    await pool.release(first.token, first.leaseId);
+    const second = await nextLease;
+
+    expect(second.worker.id).toBe(first.worker.id);
+    expect(pool.stats()).toMatchObject({ target: 1, ready: 0, leased: 1 });
   });
 });
 
@@ -856,36 +905,40 @@ describe("Docker Engine client", () => {
 });
 
 describe("pool configuration", () => {
-  it("requires a strong management token and validates worker environment", () => {
+  it("requires strong tokens and validates fixed worker origins", () => {
     expect(() => loadPoolConfig({ AGENT_SLICER_POOL_TOKEN: "short" })).toThrow(
       "at least 32 characters",
     );
     expect(() => loadPoolConfig({
       AGENT_SLICER_POOL_TOKEN: "p".repeat(48),
-      AGENT_SLICER_POOL_WORKER_ENV: "NOT AN ENV",
-    })).toThrow("NAME=value");
+      AGENT_SLICER_POOL_WORKER_TOKEN: "w".repeat(48),
+      AGENT_SLICER_POOL_WORKERS: "worker-1:8765",
+    })).toThrow("plain HTTP origins");
     expect(() => loadPoolConfig({
       AGENT_SLICER_POOL_TOKEN: "p".repeat(48),
-      AGENT_SLICER_POOL_WORKER_ENV: "AGENT_SLICER_TOKEN=override",
-    })).toThrow("pool-managed settings");
+      AGENT_SLICER_POOL_WORKER_TOKEN: "w".repeat(48),
+      AGENT_SLICER_POOL_WORKERS: "https://worker-1:8765",
+    })).toThrow("plain HTTP origins");
     const config = loadPoolConfig({
       AGENT_SLICER_POOL_TOKEN: "p".repeat(48),
-      AGENT_SLICER_POOL_SIZE: "3",
+      AGENT_SLICER_POOL_WORKER_TOKEN: "w".repeat(48),
       AGENT_SLICER_POOL_ID: "production-a",
-      AGENT_SLICER_POOL_WORKER_ENV: "ORCA_SCREEN_WIDTH=1280\nORCA_SCREEN_HEIGHT=720",
+      AGENT_SLICER_POOL_WORKERS:
+        "http://worker-1:8765,http://worker-2:8765,http://worker-3:8765",
     });
     expect(config).toMatchObject({
       poolSize: 3,
       poolId: "production-a",
-      workerEnvironment: ["ORCA_SCREEN_WIDTH=1280", "ORCA_SCREEN_HEIGHT=720"],
+      workerToken: "w".repeat(48),
     });
-    expect(config.dockerApiVersion).toBeUndefined();
-    expect(loadPoolConfig({
-      AGENT_SLICER_POOL_TOKEN: "p".repeat(48),
-      AGENT_SLICER_POOL_DOCKER_API_VERSION: "1.44",
-    }).dockerApiVersion).toBe("1.44");
+    expect(config.workerUrls.map((url) => url.href)).toEqual([
+      "http://worker-1:8765/",
+      "http://worker-2:8765/",
+      "http://worker-3:8765/",
+    ]);
     expect(() => loadPoolConfig({
       AGENT_SLICER_POOL_TOKEN: "p".repeat(48),
+      AGENT_SLICER_POOL_WORKER_TOKEN: "w".repeat(48),
       AGENT_SLICER_POOL_ID: "invalid pool id",
     })).toThrow("AGENT_SLICER_POOL_ID");
   });
