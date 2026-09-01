@@ -533,6 +533,7 @@ try {
     "job_get",
     "job_cancel",
     "gcode_export",
+    "gcode_3mf_export",
     "project_save",
   ];
   const actualTools = listed.tools.map((tool) => tool.name);
