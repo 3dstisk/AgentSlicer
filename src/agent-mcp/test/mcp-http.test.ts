@@ -223,7 +223,12 @@ async function startMcp(options: {
         if (method === "object_auto_orient" || method === "scene_arrange") {
           return { job_id: "job-1", state: "running" };
         }
-        if (method === "slice_start" || method === "gcode_export" || method === "project_save") {
+        if (
+          method === "slice_start" ||
+          method === "gcode_export" ||
+          method === "gcode_3mf_export" ||
+          method === "project_save"
+        ) {
           return { job_id: `${method}-1`, state: "running" };
         }
         if (method === "presets_list") {
@@ -1331,6 +1336,19 @@ describe("Streamable HTTP MCP server", () => {
     expect(
       (
         await client.callTool({
+          name: "gcode_3mf_export",
+          arguments: {
+            project_id: "project-1",
+            expected_revision: 4,
+            slice_job_id: "slice-job-1",
+            output_path: "part.gcode.3mf",
+          },
+        })
+      ).structuredContent,
+    ).toEqual({ job_id: "gcode_3mf_export-1", state: "running" });
+    expect(
+      (
+        await client.callTool({
           name: "project_save",
           arguments: {
             project_id: "project-1",
@@ -1352,6 +1370,16 @@ describe("Streamable HTTP MCP server", () => {
         expected_revision: 4,
         slice_job_id: "slice-job-1",
         output_path: "part.gcode",
+        overwrite: false,
+      },
+    ]);
+    expect(calls).toContainEqual([
+      "gcode_3mf_export",
+      {
+        project_id: "project-1",
+        expected_revision: 4,
+        slice_job_id: "slice-job-1",
+        output_path: "part.gcode.3mf",
         overwrite: false,
       },
     ]);

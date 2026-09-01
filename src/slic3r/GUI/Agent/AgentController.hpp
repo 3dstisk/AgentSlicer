@@ -113,6 +113,10 @@ private:
     nlohmann::json apply_settings(const nlohmann::json& params);
     nlohmann::json start_slice(const nlohmann::json& params);
     nlohmann::json start_gcode_export(const nlohmann::json& params);
+    nlohmann::json start_gcode_3mf_export(const nlohmann::json& params);
+    nlohmann::json start_gcode_artifact(const nlohmann::json& params,
+                                        std::string_view job_type,
+                                        std::string_view extension);
     nlohmann::json start_project_save(const nlohmann::json& params);
     nlohmann::json get_job(const nlohmann::json& params);
     nlohmann::json cancel_job(const nlohmann::json& params);

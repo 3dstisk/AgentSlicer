@@ -60,6 +60,7 @@ The v1 tool list and order are fixed:
 | `job_get` | Poll job state, progress, warnings, result, error, and revision. |
 | `job_cancel` | Cancel a running job, or return an already-terminal job unchanged. |
 | `gcode_export` | Publish a successful slice as one root-level `.gcode` file under `/outputs`. |
+| `gcode_3mf_export` | Publish a successful single-plate slice as one root-level MakerMesh-compatible `.gcode.3mf` file under `/outputs`. |
 | `project_save` | Publish the active project as one root-level `.3mf` file under `/outputs`. |
 
 Unknown fields are rejected. Opaque IDs and cursors must be copied exactly, not
@@ -100,8 +101,9 @@ byte limit with `AGENT_SLICER_MAX_UPLOAD_BYTES` and the ticket lifetime with
 
 ## Output downloads
 
-Resolve a successful `gcode_export` or `project_save` result path against the MCP
-endpoint origin and send the same bearer token used for MCP:
+Resolve a successful `gcode_export`, `gcode_3mf_export`, or `project_save`
+result path against the MCP endpoint origin and send the same bearer token used
+for MCP:
 
 ```http
 GET /outputs/part.gcode HTTP/1.1
@@ -137,12 +139,12 @@ settings batch is all-or-nothing; `dry_run` does not advance the revision. At
 most one mutating asynchronous job is active, otherwise the operation returns
 `mutation_in_progress`.
 
-`object_auto_orient`, `scene_arrange`, `slice_start`, and `gcode_export` return
-`{job_id, state:"running"}`. `model_import` and `project_save` register the job
-before invoking Orca, so they may instead return `{job_id, state:"failed"}` if
-native startup fails; retain that `job_id` and poll `job_get` for its stable
-failure. Otherwise poll every started job until `succeeded`, `failed`, or
-`cancelled`. Every job reports:
+`object_auto_orient`, `scene_arrange`, `slice_start`, `gcode_export`, and
+`gcode_3mf_export` return `{job_id, state:"running"}`. `model_import` and
+`project_save` register the job before invoking Orca, so they may instead return
+`{job_id, state:"failed"}` if native startup fails; retain that `job_id` and
+poll `job_get` for its stable failure. Otherwise poll every started job until
+`succeeded`, `failed`, or `cancelled`. Every job reports:
 
 - `project_id` and immutable `source_revision`
 - `state`, monotonic `progress` from 0 to 1, and current project `revision`
@@ -249,11 +251,12 @@ Uploaded models are stored under `/workspace/uploads` with server-generated
 UUID filenames and the validated lowercase source extension. Original client
 filenames are retained only as ticket metadata and cannot select server paths.
 
-`gcode_export` and `project_save` accept only a single root-level filename, with
-the exact lowercase `.gcode` or `.3mf` extension. Absolute, nested, traversal,
-symlink, and wrong-extension targets are rejected. `overwrite` defaults to
-false. Successful results use absolute `/outputs/<filename>` paths. Output is
-written to a private staging file and published atomically.
+`gcode_export`, `gcode_3mf_export`, and `project_save` accept only a single
+root-level filename, with the exact lowercase `.gcode`, `.gcode.3mf`, or `.3mf`
+extension required by the selected tool. Absolute, nested, traversal, symlink,
+and wrong-extension targets are rejected. `overwrite` defaults to false.
+Successful results use absolute `/outputs/<filename>` paths. Output is written
+to a private staging file and published atomically.
 
 `scene_render` returns structured image metadata plus one `image/png` MCP content
 item per requested view, in request order. It always returns the public

@@ -1844,7 +1844,30 @@ public:
                 false, warnings(status)};
     }
 
+    void start_gcode_3mf_export(const std::filesystem::path& path,
+                                std::size_t plate_index) override
+    {
+        start_3mf_save(path, true, static_cast<int>(plate_index));
+    }
+
+    FacadeJobState gcode_3mf_export_state() const override
+    {
+        return three_mf_save_state("G-code 3MF export job was not started");
+    }
+
     void start_project_save(const std::filesystem::path& path) override
+    {
+        start_3mf_save(path, false, -1);
+    }
+
+    FacadeJobState project_save_state() const override
+    {
+        return three_mf_save_state("Project save job was not started");
+    }
+
+    void start_3mf_save(const std::filesystem::path& path,
+                        bool include_gcode,
+                        int plate_index)
     {
         assert_gui_thread();
         if (!m_plater.get_ui_job_worker().is_idle())
@@ -1855,7 +1878,7 @@ public:
         m_save_state = std::make_shared<FacadeJobState>();
         std::weak_ptr<FacadeJobState> weak_state = m_save_state;
         const std::weak_ptr<void> lifetime = m_lifetime;
-        m_plater.CallAfter([this, path, lifetime, weak_state] {
+        m_plater.CallAfter([this, path, include_gcode, plate_index, lifetime, weak_state] {
             if (lifetime.expired())
                 return;
             const auto state = weak_state.lock();
@@ -1866,8 +1889,8 @@ public:
                           {{"message", "Orca project save worker became busy"}}};
                 return;
             }
-            m_save_worker_owned = m_plater.save_project_for_agent(
-                boost::filesystem::path(path.string()), lifetime,
+            m_save_worker_owned = m_plater.save_3mf_for_agent(
+                boost::filesystem::path(path.string()), include_gcode, plate_index, lifetime,
                 [weak_state](bool failed, std::string error) {
                     if (const auto state = weak_state.lock(); state && !state->complete) {
                         if (failed)
@@ -1880,11 +1903,11 @@ public:
         });
     }
 
-    FacadeJobState project_save_state() const override
+    FacadeJobState three_mf_save_state(const char* not_started_message) const
     {
         assert_gui_thread();
         if (!m_save_active)
-            return {true, true, 1.0, nullptr, {{"message", "Project save job was not started"}}};
+            return {true, true, 1.0, nullptr, {{"message", not_started_message}}};
         if (!m_save_state || !m_save_state->complete)
             return {false, false, 0.5, nullptr, nullptr};
         m_save_active = false;
@@ -1933,7 +1956,7 @@ public:
                                  "G-code export is no longer cancellable");
             return;
         }
-        if (type == "project_save") {
+        if (type == "project_save" || type == "gcode_3mf_export") {
             if (!m_save_active || !m_save_state || m_save_state->complete)
                 throw AgentError(ErrorCode::InvalidJobTransition,
                                  "Project save is no longer cancellable");

@@ -18322,8 +18322,10 @@ bool Plater::export_gcode_for_agent(const boost::filesystem::path& output_path,
     return started;
 }
 
-bool Plater::save_project_for_agent(
+bool Plater::save_3mf_for_agent(
     const boost::filesystem::path& output_path,
+    bool include_gcode,
+    int plate_index,
     std::weak_ptr<void> lifetime,
     std::function<void(bool, std::string)> completion)
 {
@@ -18336,6 +18338,7 @@ bool Plater::save_project_for_agent(
         std::string             path;
         std::optional<Agent::ArtifactFileIdentity> path_identity;
         std::optional<Agent::ArtifactFileIdentity> temporary_identity;
+        SaveStrategy            strategy {SaveStrategy::Silence | SaveStrategy::Zip64};
         bool                    stored {false};
 
         ~SavePayload()
@@ -18360,7 +18363,11 @@ bool Plater::save_project_for_agent(
         // the GUI thread. The worker receives only deep-owned serialization inputs.
         payload->model = Model(p->model);
         payload->config = wxGetApp().preset_bundle->full_config_secure();
-        p->partplate_list.store_to_3mf_structure(payload->plate_data, false, -1);
+        if (include_gcode)
+            payload->strategy = SaveStrategy::Silence | SaveStrategy::SplitModel |
+                SaveStrategy::WithGcode | SaveStrategy::SkipModel;
+        p->partplate_list.store_to_3mf_structure(
+            payload->plate_data, include_gcode, plate_index);
         payload->project_presets =
             wxGetApp().preset_bundle->get_current_project_embedded_presets();
         payload->project = p->project;
@@ -18408,8 +18415,7 @@ bool Plater::save_project_for_agent(
             if (ctl.was_canceled())
                 return;
 
-            const SaveStrategy strategy = SaveStrategy::Silence | SaveStrategy::Zip64;
-            publish(payload->model, strategy);
+            publish(payload->model, payload->strategy);
 
             StoreParams params;
             params.path = payload->path;
@@ -18417,7 +18423,7 @@ bool Plater::save_project_for_agent(
             params.plate_data_list = payload->plate_data;
             params.project_presets = payload->project_presets;
             params.config = &payload->config;
-            params.strategy = strategy;
+            params.strategy = payload->strategy;
             params.project = &payload->project;
             params.proFn = [&ctl](int, int, int, bool& cancel) {
                 cancel = ctl.was_canceled();

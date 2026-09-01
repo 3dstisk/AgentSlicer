@@ -649,9 +649,11 @@ public:
     bool slice_for_agent(std::optional<std::size_t> plate_index);
     bool export_gcode_for_agent(const boost::filesystem::path& output_path,
                                 std::size_t plate_index);
-    bool save_project_for_agent(const boost::filesystem::path& output_path,
-                                std::weak_ptr<void> lifetime,
-                                std::function<void(bool, std::string)> completion);
+    bool save_3mf_for_agent(const boost::filesystem::path& output_path,
+                            bool include_gcode,
+                            int plate_index,
+                            std::weak_ptr<void> lifetime,
+                            std::function<void(bool, std::string)> completion);
     AgentProcessStatus agent_process_status() const;
     bool cancel_agent_process();
     void orient();

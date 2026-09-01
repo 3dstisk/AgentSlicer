@@ -314,6 +314,8 @@ nlohmann::json AgentController::handle_prepared(const PreparedRequest& prepared)
             return start_slice(request.params);
         if (request.method == "gcode_export")
             return start_gcode_export(request.params);
+        if (request.method == "gcode_3mf_export")
+            return start_gcode_3mf_export(request.params);
         if (request.method == "project_save")
             return start_project_save(request.params);
         if (request.method == "job_get")
@@ -423,6 +425,8 @@ void AgentController::refresh_jobs()
             native = m_facade->slice_state();
         else if (job.type == "gcode_export")
             native = m_facade->gcode_export_state();
+        else if (job.type == "gcode_3mf_export")
+            native = m_facade->gcode_3mf_export_state();
         else if (job.type == "project_save")
             native = m_facade->project_save_state();
         else
@@ -469,7 +473,8 @@ void AgentController::refresh_jobs()
                 job.result["project_id"] = job.project_id;
                 job.result["revision"] = m_revision;
             }
-            if (job.type == "gcode_export" || job.type == "project_save")
+            if (job.type == "gcode_export" || job.type == "gcode_3mf_export" ||
+                job.type == "project_save")
                 finish_artifact(job, std::move(native));
             else
                 job.state = JobState::Succeeded;
@@ -631,7 +636,8 @@ nlohmann::json AgentController::status() const
                           "object_transform", "object_auto_orient", "scene_arrange", "scene_render",
                           "toolpath_render",
                           "desktop_capture", "preset_control", "settings_control",
-                          "job_registry", "job_cancel", "slice", "gcode_export", "project_save"}}
+                          "job_registry", "job_cancel", "slice", "gcode_export",
+                          "gcode_3mf_export", "project_save"}}
     };
 }
 
@@ -1086,13 +1092,26 @@ nlohmann::json AgentController::start_slice(const nlohmann::json& params)
 
 nlohmann::json AgentController::start_gcode_export(const nlohmann::json& params)
 {
+    return start_gcode_artifact(params, "gcode_export", ".gcode");
+}
+
+nlohmann::json AgentController::start_gcode_3mf_export(const nlohmann::json& params)
+{
+    return start_gcode_artifact(params, "gcode_3mf_export", ".gcode.3mf");
+}
+
+nlohmann::json AgentController::start_gcode_artifact(
+    const nlohmann::json& params,
+    std::string_view job_type,
+    std::string_view extension)
+{
     if (!params.contains("expected_revision"))
         throw AgentError(ErrorCode::InvalidRequest, "expected_revision is required");
     if (!params.contains("slice_job_id") || !params.at("slice_job_id").is_string())
         throw AgentError(ErrorCode::InvalidRequest, "slice_job_id must be a string");
     if (params.contains("overwrite") && !params.at("overwrite").is_boolean())
         throw AgentError(ErrorCode::InvalidRequest, "overwrite must be a boolean");
-    const auto output = resolve_output_file(params, ".gcode");
+    const auto output = resolve_output_file(params, extension);
     const bool overwrite = params.value("overwrite", false);
     std::lock_guard<std::mutex> lock(m_mutex);
     require_active_project(params);
@@ -1107,7 +1126,7 @@ nlohmann::json AgentController::start_gcode_export(const nlohmann::json& params)
     const std::string id = make_opaque_id("job");
     Job job;
     job.id = id;
-    job.type = "gcode_export";
+    job.type = job_type;
     job.state = JobState::Running;
     job.facade_managed = true;
     job.project_id = *m_project_id;
@@ -1121,8 +1140,12 @@ nlohmann::json AgentController::start_gcode_export(const nlohmann::json& params)
     job.staging_path = make_staging_path(output);
     job.overwrite = overwrite;
     try {
-        m_facade->start_gcode_export(
-            job.staging_path, source->second.metadata.at("plate_index").get<std::size_t>());
+        const std::size_t plate_index =
+            source->second.metadata.at("plate_index").get<std::size_t>();
+        if (job_type == "gcode_3mf_export")
+            m_facade->start_gcode_3mf_export(job.staging_path, plate_index);
+        else
+            m_facade->start_gcode_export(job.staging_path, plate_index);
     } catch (...) {
         capture_staging_identity(job);
         cleanup_staging(job);
@@ -1292,8 +1315,8 @@ std::filesystem::path AgentController::resolve_output_file(
     for (const auto& component : relative)
         if (component == "." || component == ".." || component.empty())
             throw AgentError(ErrorCode::InvalidPath, "output_path contains an unsafe component");
-    std::string actual_extension = relative.extension().string();
-    if (actual_extension != extension)
+    if (raw.size() < extension.size() ||
+        raw.compare(raw.size() - extension.size(), extension.size(), extension) != 0)
         throw AgentError(ErrorCode::InvalidPath, "output_path has the wrong extension",
                          {{"required_extension", extension}});
 
@@ -1366,7 +1389,7 @@ void AgentController::finish_artifact(Job& job, FacadeJobState)
     job.staging_temporary_identity.reset();
     job.state = JobState::Succeeded;
     job.result = {{"path", job.output_path.string()}, {"bytes", published_size}};
-    if (job.type == "gcode_export")
+    if (job.type == "gcode_export" || job.type == "gcode_3mf_export")
         job.result["slice_job_id"] = job.metadata.at("slice_job_id");
 }
 

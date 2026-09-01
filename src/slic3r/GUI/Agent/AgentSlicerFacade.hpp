@@ -59,6 +59,9 @@ public:
     virtual void start_gcode_export(const std::filesystem::path& path,
                                     std::size_t plate_index) = 0;
     virtual FacadeJobState gcode_export_state() const = 0;
+    virtual void start_gcode_3mf_export(const std::filesystem::path& path,
+                                        std::size_t plate_index) = 0;
+    virtual FacadeJobState gcode_3mf_export_state() const = 0;
     virtual void start_project_save(const std::filesystem::path& path) = 0;
     virtual FacadeJobState project_save_state() const = 0;
     virtual void cancel_job(std::string_view type) = 0;

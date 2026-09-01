@@ -30,6 +30,7 @@ describe("MCP tool schemas", () => {
       "job_get",
       "job_cancel",
       "gcode_export",
+      "gcode_3mf_export",
       "project_save",
     ]);
   });
@@ -251,6 +252,14 @@ describe("MCP tool schemas", () => {
       }).overwrite,
     ).toBe(false);
     expect(
+      toolSchemas.gcode_3mf_export.parse({
+        project_id: "project-1",
+        expected_revision: 4,
+        slice_job_id: "slice-1",
+        output_path: "part.gcode.3mf",
+      }).overwrite,
+    ).toBe(false);
+    expect(
       toolSchemas.project_save.parse({
         project_id: "project-1",
         expected_revision: 4,
@@ -279,6 +288,14 @@ describe("MCP tool schemas", () => {
         output_path,
       ).toBe(false);
     }
+    expect(
+      toolSchemas.gcode_3mf_export.safeParse({
+        project_id: "project-1",
+        expected_revision: 4,
+        slice_job_id: "slice-1",
+        output_path: "part.3mf",
+      }).success,
+    ).toBe(false);
     expect(
       toolSchemas.project_save.safeParse({
         project_id: "project-1",

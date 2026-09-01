@@ -184,7 +184,9 @@ const scale3 = z
   .strict();
 const unsignedSafeInteger = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 
-function outputPath(extension: ".gcode" | ".3mf") {
+type OutputExtension = ".gcode" | ".gcode.3mf" | ".3mf";
+
+function outputPath(extension: OutputExtension) {
   return z
     .string()
     .min(1)
@@ -218,7 +220,7 @@ function outputPath(extension: ".gcode" | ".3mf") {
     .describe(`Root-level filename beneath /outputs ending in ${extension}`);
 }
 
-function artifactPath(extension: ".gcode" | ".3mf") {
+function artifactPath(extension: OutputExtension) {
   return z
     .string()
     .min(1)
@@ -418,6 +420,14 @@ export const toolSchemas = {
       overwrite: z.boolean().default(false),
     })
     .strict(),
+  gcode_3mf_export: z
+    .object({
+      ...projectWithRevision,
+      slice_job_id: opaqueId,
+      output_path: outputPath(".gcode.3mf"),
+      overwrite: z.boolean().default(false),
+    })
+    .strict(),
   project_save: z
     .object({
       ...projectWithRevision,
@@ -494,6 +504,7 @@ export const toolNames = [
   "job_get",
   "job_cancel",
   "gcode_export",
+  "gcode_3mf_export",
   "project_save",
 ] as const;
 
@@ -549,6 +560,8 @@ const descriptions: Record<ToolName, string> = {
     "Cancel a running asynchronous job. Cancellation is idempotent: terminal jobs are returned unchanged, while accepted cancellation returns the stable cancelled job snapshot.",
   gcode_export:
     "Export a successful slice job to a root-level .gcode filename beneath /outputs. Download the successful result path from the MCP origin with the same bearer token.",
+  gcode_3mf_export:
+    "Export a successful slice job to a root-level .gcode.3mf Bambu print archive beneath /outputs. Download the successful result path from the MCP origin with the same bearer token.",
   project_save:
     "Save the active project to a root-level .3mf filename beneath /outputs. Download the successful result path from the MCP origin with the same bearer token.",
 };
@@ -1025,6 +1038,27 @@ const gcodeExportJobSchema = z
       .nullable(),
   })
   .strict();
+const gcode3mfExportJobSchema = z
+  .object({
+    ...jobBase,
+    type: z.literal("gcode_3mf_export"),
+    metadata: z
+      .object({
+        slice_job_id: opaqueId,
+        output_path: outputPath(".gcode.3mf"),
+        config_snapshot: configSnapshotSchema,
+      })
+      .strict(),
+    result: z
+      .object({
+        path: artifactPath(".gcode.3mf"),
+        bytes: z.number().int().nonnegative(),
+        slice_job_id: opaqueId,
+      })
+      .strict()
+      .nullable(),
+  })
+  .strict();
 const projectSaveJobSchema = z
   .object({
     ...jobBase,
@@ -1062,6 +1096,7 @@ export const jobResultSchema = z.discriminatedUnion("type", [
   modelImportJobSchema,
   sliceJobSchema,
   gcodeExportJobSchema,
+  gcode3mfExportJobSchema,
   projectSaveJobSchema,
 ]);
 
@@ -1696,6 +1731,20 @@ export function registerAgentTools(server: McpServer, dependencies: AgentToolDep
       outputSchema: runningJobStartResultSchema,
     },
     (params) => bridgeTool(dependencies, "gcode_export", params, runningJobStartResultSchema),
+  );
+  server.registerTool(
+    "gcode_3mf_export",
+    {
+      description: descriptions.gcode_3mf_export,
+      inputSchema: toolSchemas.gcode_3mf_export,
+      outputSchema: runningJobStartResultSchema,
+    },
+    (params) => bridgeTool(
+      dependencies,
+      "gcode_3mf_export",
+      params,
+      runningJobStartResultSchema,
+    ),
   );
   server.registerTool(
     "project_save",

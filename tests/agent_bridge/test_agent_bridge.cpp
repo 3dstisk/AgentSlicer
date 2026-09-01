@@ -231,6 +231,20 @@ public:
             on_export_state();
         return next_export_state;
     }
+    void start_gcode_3mf_export(const std::filesystem::path& path,
+                                std::size_t plate_index) override
+    {
+        export_path = path;
+        export_plate_index = plate_index;
+        if (write_export)
+            std::ofstream(path) << export_contents;
+    }
+    FacadeJobState gcode_3mf_export_state() const override
+    {
+        if (on_export_state)
+            on_export_state();
+        return next_export_state;
+    }
     void start_project_save(const std::filesystem::path& path) override
     {
         save_path = path;
@@ -2022,6 +2036,25 @@ TEST_CASE("Slice and export jobs preserve revision and publish staged artifacts"
     REQUIRE(exported["metadata"]["config_snapshot"] ==
             sliced["metadata"]["config_snapshot"]);
     REQUIRE(exported["metadata"]["config_snapshot"]["settings"]["layer_height"] == "0.2");
+    REQUIRE(facade->export_plate_index == 1);
+    REQUIRE(facade->export_path.parent_path() == workspace.root / "artifacts");
+    REQUIRE_FALSE(std::filesystem::exists(facade->export_path));
+    REQUIRE(std::filesystem::is_empty(workspace.root / "artifacts"));
+
+    const auto gcode_3mf_started = controller.handle(
+        {"export-3mf", "gcode_3mf_export",
+         {{"project_id", project["project_id"]},
+          {"expected_revision", project["revision"]},
+          {"slice_job_id", slice["job_id"]},
+          {"output_path", "plate.gcode.3mf"}}});
+    const auto gcode_3mf_exported = controller.handle(
+        {"export-3mf-get", "job_get", {{"job_id", gcode_3mf_started["job_id"]}}});
+    REQUIRE(gcode_3mf_exported["state"] == "succeeded");
+    REQUIRE(gcode_3mf_exported["revision"] == project["revision"]);
+    REQUIRE(gcode_3mf_exported["result"]["slice_job_id"] == slice["job_id"]);
+    REQUIRE(gcode_3mf_exported["result"]["path"] ==
+            std::filesystem::canonical(output_root / "plate.gcode.3mf").string());
+    REQUIRE(std::filesystem::is_regular_file(output_root / "plate.gcode.3mf"));
     REQUIRE(facade->export_plate_index == 1);
     REQUIRE(facade->export_path.parent_path() == workspace.root / "artifacts");
     REQUIRE_FALSE(std::filesystem::exists(facade->export_path));
