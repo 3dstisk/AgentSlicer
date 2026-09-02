@@ -182,6 +182,7 @@ jobs:
       image: ${{ steps.resolve.outputs.image }}
       promote: ${{ steps.resolve.outputs.promote }}
       source-image: ${{ steps.resolve.outputs.source-image }}
+      target-image: ${{ steps.resolve.outputs.target-image }}
     steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -220,6 +221,7 @@ jobs:
           echo "image=$repository@$digest" >> "$GITHUB_OUTPUT"
           echo "promote=$promote" >> "$GITHUB_OUTPUT"
           echo "source-image=$source_image" >> "$GITHUB_OUTPUT"
+          echo "target-image=$NATIVE_IMAGE" >> "$GITHUB_OUTPUT"
 
   publish:
     name: Test and publish worker plus pool images
@@ -338,7 +340,7 @@ jobs:
       - name: Promote tested native image
         if: needs.resolve-native-image.outputs.promote == 'true'
         env:
-          NATIVE_IMAGE: ${{ needs.native-image.outputs.image }}
+          NATIVE_IMAGE: ${{ needs.resolve-native-image.outputs.target-image }}
           SOURCE_IMAGE: ${{ needs.resolve-native-image.outputs.source-image }}
         shell: bash
         run: |
