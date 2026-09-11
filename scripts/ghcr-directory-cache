@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+
+# Store a directory as a data-only OCI image. The caller logs in to GHCR.
+set -euo pipefail
+
+mode=${1:?Usage: ghcr-directory-cache lookup|restore|restore-optional|save IMAGE [DIRECTORY]}
+image=${2:?Missing image}
+
+lookup() {
+    if output=$(docker manifest inspect "$image" 2>&1); then
+        hit=true
+    elif grep -Eqi 'manifest unknown|no such manifest' <<< "$output"; then
+        hit=false
+    else
+        printf '%s\n' "$output" >&2
+        return 1
+    fi
+    echo "Cache $image: hit=$hit"
+    if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+        echo "hit=$hit" >> "$GITHUB_OUTPUT"
+    fi
+}
+
+case "$mode" in
+    lookup)
+        lookup
+        ;;
+    restore|restore-optional)
+        directory=${3:?Missing directory}
+        if [[ "$mode" == restore-optional ]]; then
+            lookup
+            if [[ "$hit" == false ]]; then
+                mkdir -p "$directory"
+                exit 0
+            fi
+        fi
+        docker pull "$image"
+        # The placeholder command is never run. scratch contains only cache data.
+        container=$(docker create "$image" /unused)
+        trap 'docker rm "$container" >/dev/null' EXIT
+        mkdir -p "$directory"
+        docker cp "$container:/cache/." "$directory/"
+        ;;
+    save)
+        directory=${3:?Missing directory}
+        test -d "$directory"
+        docker build --platform linux/amd64 --tag "$image" \
+            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY:?}" \
+            --file - "$directory" <<'DOCKERFILE'
+FROM scratch
+COPY . /cache/
+DOCKERFILE
+        docker push "$image"
+        ;;
+    *)
+        echo "Unknown cache operation: $mode" >&2
+        exit 2
+        ;;
+esac

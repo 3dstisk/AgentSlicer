@@ -1,6 +1,10 @@
 on:
   workflow_call:
     inputs:
+      cache-image:
+        description: GHCR dependency image; empty uses Actions cache
+        required: false
+        type: string
       cache-key:
         required: true
         type: string
@@ -38,7 +42,16 @@ jobs:
         with:
           lfs: 'false'
 
+      - name: Log in to dependency cache registry
+        if: inputs.cache-image != ''
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - name: load cached deps
+        if: inputs.cache-image == ''
         uses: actions/cache@v6
         with:
           path: ${{ inputs.cache-path }}
@@ -170,6 +183,16 @@ jobs:
             tar -czvf OrcaSlicer_dep_ubuntu_$(date +"%Y%m%d").tar.gz destdir
 
 
+      - name: Save dependency prefix to GHCR
+        if: inputs.cache-image != ''
+        shell: bash
+        env:
+          CACHE_IMAGE: ${{ inputs.cache-image }}
+          CACHE_PATH: ${{ inputs.cache-path }}
+        run: |
+          test -d "$CACHE_PATH/usr/local"
+          bash scripts/ghcr-directory-cache save "$CACHE_IMAGE" "$CACHE_PATH"
+
       # Upload Artifacts
       # - name: Upload Mac ${{ inputs.arch }} artifacts
       #   if: runner.os == 'macOS'
@@ -200,6 +223,7 @@ jobs:
     if: ${{ !cancelled() && !inputs.build-deps-only && (inputs.force-build || (inputs.valid-cache == true && needs.build_deps.result == 'skipped') || (inputs.valid-cache != true && success())) }}
     uses: ./.github/workflows/build_orca.yml
     with:
+      cache-image: ${{ inputs.cache-image }}
       cache-key: ${{ inputs.cache-key }}
       cache-path: ${{ inputs.cache-path }}
       os: ${{ inputs.os }}

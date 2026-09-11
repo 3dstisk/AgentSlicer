@@ -1,6 +1,10 @@
 on:
     workflow_call:
       inputs:
+        cache-image:
+          description: GHCR dependency image; empty uses Actions cache
+          required: false
+          type: string
         cache-key:
           required: false
           type: string
@@ -42,8 +46,52 @@ jobs:
         with:
           lfs: 'false'
 
+      - name: Log in to dependency cache registry
+        if: inputs.cache-image != ''
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Restore dependency prefix from GHCR
+        if: inputs.cache-image != ''
+        shell: bash
+        env:
+          CACHE_IMAGE: ${{ inputs.cache-image }}
+          CACHE_PATH: ${{ inputs.cache-path }}
+        run: bash scripts/ghcr-directory-cache restore "$CACHE_IMAGE" "$CACHE_PATH"
+
+      - name: Configure compiler cache
+        if: inputs.cache-image != ''
+        shell: bash
+        run: |
+          echo "SCCACHE_DIR=$RUNNER_TEMP/orca-sccache" >> "$GITHUB_ENV"
+          echo "SCCACHE_CACHE_SIZE=5G" >> "$GITHUB_ENV"
+          echo "SCCACHE_IDLE_TIMEOUT=0" >> "$GITHUB_ENV"
+          echo "CMAKE_CCACHE=sccache" >> "$GITHUB_ENV"
+
+      - name: Set up sccache
+        if: inputs.cache-image != ''
+        uses: mozilla-actions/sccache-action@v0.0.10
+        with:
+          version: v0.17.0
+
+      - name: Restore compiler cache from GHCR
+        if: inputs.cache-image != ''
+        shell: bash
+        env:
+          DEPS_IMAGE: ${{ inputs.cache-image }}
+        run: |
+          # Concurrent releases may replace each other's snapshots. This only
+          # reduces cache coverage; sccache validates each compilation key.
+          image="${DEPS_IMAGE%:*}:sccache-v1-linux-amd64"
+          echo "SCCACHE_IMAGE=$image" >> "$GITHUB_ENV"
+          bash scripts/ghcr-directory-cache restore-optional "$image" "$SCCACHE_DIR"
+          sccache --zero-stats
+
       - name: load cached deps
-        if: ${{ !(runner.os == 'macOS' && inputs.macos-combine-only) }}
+        if: ${{ inputs.cache-image == '' && !(runner.os == 'macOS' && inputs.macos-combine-only) }}
         uses: actions/cache@v6
         with:
           path: ${{ inputs.cache-path }}
@@ -516,6 +564,7 @@ jobs:
         # Tests must built at the same time as the slicer;
         # if you untangle them feel free to separate them here too
       - name: Build slicer and tests
+        id: linux_build
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -527,6 +576,14 @@ jobs:
           mv -n ./build/OrcaSlicer_Linux_V${{ env.ver_pure }}.AppImage "$appimage"
           chmod +x "$appimage"
           tar -cvf build_tests.tar build/tests
+
+      - name: Save compiler cache to GHCR
+        if: ${{ !cancelled() && inputs.cache-image != '' && steps.linux_build.outcome == 'success' }}
+        shell: bash
+        run: |
+          sccache --show-stats
+          sccache --stop-server
+          bash scripts/ghcr-directory-cache save "$SCCACHE_IMAGE" "$SCCACHE_DIR"
 
         # Use tar because upload-artifacts won't always preserve directory structure
         # and doesn't preserve file permissions

@@ -15,12 +15,12 @@ concurrency:
 env:
   # Bump this epoch when the native runner/toolchain or updater-signing input
   # changes without a corresponding tracked-file change.
-  NATIVE_IMAGE_CACHE_VERSION: v1
+  NATIVE_IMAGE_CACHE_VERSION: v2
 
 jobs:
   native-image:
     name: Resolve native OrcaSlicer image
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     permissions:
       contents: read
       packages: read
@@ -77,9 +77,13 @@ jobs:
     name: Build OrcaSlicer Linux x86_64
     needs: native-image
     if: needs.native-image.outputs.exists != 'true'
+    permissions:
+      contents: read
+      packages: write
     uses: ./.github/workflows/build_check_cache.yml
     with:
-      os: ubuntu-24.04
+      os: blacksmith-8vcpu-ubuntu-2404
+      ghcr-cache: true
     secrets: inherit
 
   test-linux-x86_64:
@@ -88,14 +92,14 @@ jobs:
     if: needs.native-image.outputs.exists != 'true' && needs.build-linux-x86_64.result == 'success'
     uses: ./.github/workflows/unit_tests.yml
     with:
-      os: ubuntu-24.04
+      os: blacksmith-8vcpu-ubuntu-2404
       artifact: ${{ github.sha }}-tests-linux-x86_64
 
   publish-native-image:
     name: Publish native OrcaSlicer candidate
     needs: [native-image, build-linux-x86_64, test-linux-x86_64]
     if: ${{ always() && !cancelled() && needs.native-image.outputs.exists != 'true' && needs.build-linux-x86_64.result == 'success' && needs.test-linux-x86_64.result == 'success' }}
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     permissions:
       contents: read
       packages: write
@@ -174,7 +178,7 @@ jobs:
     name: Pin native OrcaSlicer image digest
     needs: [native-image, publish-native-image]
     if: ${{ always() && !cancelled() && (needs.native-image.outputs.exists == 'true' || needs.publish-native-image.result == 'success') }}
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     permissions:
       contents: read
       packages: read
@@ -227,7 +231,7 @@ jobs:
     name: Test and publish worker plus pool images
     needs: resolve-native-image
     if: ${{ always() && !cancelled() && needs.resolve-native-image.result == 'success' }}
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     permissions:
       contents: read
       packages: write

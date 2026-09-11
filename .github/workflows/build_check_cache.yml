@@ -3,6 +3,10 @@ name: Check Cache
 on:
   workflow_call:
     inputs:
+      ghcr-cache:
+        description: Use GHCR caches for the Linux x86_64 release
+        required: false
+        type: boolean
       os:
         required: true
         type: string
@@ -23,7 +27,8 @@ jobs:
     outputs:
       cache-key: ${{ steps.set_outputs.outputs.cache-key }}
       cache-path: ${{ steps.set_outputs.outputs.cache-path }}
-      valid-cache: ${{ steps.cache_deps.outputs.cache-hit }}
+      valid-cache: ${{ inputs.ghcr-cache && steps.registry.outputs.hit || steps.cache_deps.outputs.cache-hit }}
+      cache-image: ${{ steps.registry_identity.outputs.image }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -44,7 +49,42 @@ jobs:
           echo cache-key=${{ env.cache-os }}-cache-orcaslicer_deps-build-${{ hashFiles('deps/**') }} >> ${{ env.output-cmd }}
           echo cache-path=${{ github.workspace }}/deps/build${{ env.dep-folder-name }} >> ${{ env.output-cmd }}
             
+      - name: Compute registry cache identity
+        if: inputs.ghcr-cache
+        id: registry_identity
+        shell: bash
+        env:
+          RUNNER_LABEL: ${{ inputs.os }}
+          INPUT_ARCH: ${{ inputs.arch }}
+          DEPS_HASH: ${{ hashFiles('deps/**', 'build_linux.sh', '.github/actions/apt-install-deps/**', '.github/workflows/build_deps.yml') }}
+        run: |
+          set -euo pipefail
+          test "$RUNNER_LABEL" = blacksmith-8vcpu-ubuntu-2404
+          test -z "$INPUT_ARCH"
+          # wx-config embeds the installation path. Never reuse a prefix at a
+          # different checkout path. Bump v1 for untracked toolchain changes.
+          key=$(printf '%s\n' "$DEPS_HASH" "$RUNNER_LABEL" "$GITHUB_WORKSPACE" | sha256sum | cut -d ' ' -f1)
+          repository=${GITHUB_REPOSITORY,,}
+          echo "image=ghcr.io/$repository-build-cache:deps-v1-linux-amd64-$key" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to dependency cache registry
+        if: inputs.ghcr-cache
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Look up dependency image
+        if: inputs.ghcr-cache
+        id: registry
+        shell: bash
+        env:
+          CACHE_IMAGE: ${{ steps.registry_identity.outputs.image }}
+        run: bash scripts/ghcr-directory-cache lookup "$CACHE_IMAGE"
+
       - name: load cache
+        if: ${{ !inputs.ghcr-cache }}
         id: cache_deps
         uses: actions/cache@v6
         with:
@@ -57,6 +97,7 @@ jobs:
     needs: [check_cache]
     uses: ./.github/workflows/build_deps.yml
     with:
+      cache-image: ${{ needs.check_cache.outputs.cache-image }}
       cache-key: ${{ needs.check_cache.outputs.cache-key }}
       cache-path: ${{ needs.check_cache.outputs.cache-path }}
       valid-cache: ${{ needs.check_cache.outputs.valid-cache == 'true' }}
