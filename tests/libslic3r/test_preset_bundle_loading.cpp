@@ -1,6 +1,7 @@
 #include <catch2/catch_all.hpp>
 
 #include <algorithm>
+#include <array>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem.hpp>
 
@@ -102,7 +103,72 @@ struct RenameTestCollection : public PresetCollection
     using PresetCollection::update_map_system_profile_renamed;
 };
 
+struct VendorTestCollection : public PresetCollection
+{
+    VendorTestCollection()
+        : PresetCollection(Preset::TYPE_PRINT, Preset::print_options(),
+                           static_cast<const PrintRegionConfig &>(FullPrintConfig::defaults()))
+    {}
+    using PresetCollection::update_vendor_ptrs_after_copy;
+};
+
 } // namespace
+
+TEST_CASE("Vendor remapping includes edited presets and preserves null vendors", "[Preset][VendorOwnership]")
+{
+    VendorMap original;
+    original.emplace("copy-test", VendorProfile("copy-test"));
+    VendorTestCollection collection;
+    Preset &preset = add_inmemory_preset(collection, "Vendor preset");
+    preset.vendor = &original.at("copy-test");
+    preset.is_system = true;
+    REQUIRE(collection.select_preset_by_name("Vendor preset", true));
+    collection.update_saved_preset_from_current_preset();
+
+    VendorMap copied(original);
+    collection.update_vendor_ptrs_after_copy(copied);
+    CHECK(collection.get_selected_preset().vendor == &copied.at("copy-test"));
+    CHECK(collection.get_edited_preset().vendor == &copied.at("copy-test"));
+
+    VendorTestCollection defaults;
+    defaults.update_vendor_ptrs_after_copy(copied);
+    CHECK(defaults.get_edited_preset().vendor == nullptr);
+}
+
+TEST_CASE("Copied preset bundles own their selected vendor profiles", "[Preset][VendorOwnership]")
+{
+    PresetBundle destination;
+    {
+        PresetBundle source;
+        auto &vendor = source.vendors.emplace("copy-test", VendorProfile("copy-test")).first->second;
+        vendor.name = "Copy test vendor";
+        for (PresetCollection *collection : std::array<PresetCollection *, 5>{
+                 &source.prints, &source.sla_prints, &source.filaments, &source.sla_materials, &source.printers}) {
+            Preset &preset = add_inmemory_preset(*collection, "Vendor preset");
+            preset.vendor = &vendor;
+            preset.is_system = true;
+            REQUIRE(collection->select_preset_by_name("Vendor preset", true));
+            collection->update_saved_preset_from_current_preset();
+        }
+
+        const auto check_ownership = [](const PresetBundle &bundle) {
+            const VendorProfile *owned_vendor = &bundle.vendors.at("copy-test");
+            for (const PresetCollection *collection : std::array<const PresetCollection *, 5>{
+                     &bundle.prints, &bundle.sla_prints, &bundle.filaments, &bundle.sla_materials, &bundle.printers}) {
+                CHECK(collection->get_selected_preset().vendor == owned_vendor);
+                REQUIRE(collection->get_edited_preset().vendor == owned_vendor);
+            }
+        };
+
+        PresetBundle copied(source);
+        check_ownership(copied);
+        destination = copied;
+        check_ownership(destination);
+    }
+    CHECK(destination.printers.get_edited_preset().vendor->name == "Copy test vendor");
+    PresetBundle repeated(destination);
+    CHECK(repeated.printers.get_edited_preset().vendor == &repeated.vendors.at("copy-test"));
+}
 
 TEST_CASE("Preset identity is canonicalized from load path", "[Preset][Identity]")
 {

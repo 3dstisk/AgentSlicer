@@ -1322,6 +1322,51 @@ try {
     project_bytes: projectStat.size,
   });
 
+  // Pool workers serve more than one project during their lifetime.
+  for (let iteration = 1; iteration <= 2; iteration++) {
+    project = (await call(client, "project_create", {})).value;
+    project = (await call(client, "presets_select", {
+      project_id: project.project_id,
+      expected_revision: project.revision,
+      selection: bootstrapSelection,
+      discard_dirty: true,
+    })).value;
+    const imported = (await call(client, "model_import", {
+      project_id: project.project_id,
+      expected_revision: project.revision,
+      path: fixturePath,
+    })).value;
+    await waitForJob(client, imported.job_id);
+    scene = (await call(client, "scene_get", { project_id: project.project_id })).value;
+    const arranged = (await call(client, "scene_arrange", {
+      project_id: project.project_id,
+      expected_revision: scene.revision,
+    })).value;
+    await waitForJob(client, arranged.job_id);
+    scene = (await call(client, "scene_get", { project_id: project.project_id })).value;
+    project = { project_id: project.project_id, revision: scene.revision };
+    const started = (await call(client, "slice_start", {
+      project_id: project.project_id,
+      expected_revision: project.revision,
+      plate_index: 0,
+    })).value;
+    const sliced = await waitForJob(client, started.job_id);
+    assertSucceededJob(sliced, "slice", project, bootstrapSelection);
+    const exporting = (await call(client, "gcode_export", {
+      project_id: project.project_id,
+      expected_revision: project.revision,
+      slice_job_id: sliced.job_id,
+      output_path: `reused-worker-${iteration}.gcode`,
+      overwrite: true,
+    })).value;
+    const exported = await waitForJob(client, exporting.job_id);
+    assertSucceededJob(exported, "gcode_export", project, bootstrapSelection);
+    if (!(exported.result?.bytes > 0)) {
+      throw new Error(`Reused worker exported empty G-code: ${JSON.stringify(exported)}`);
+    }
+    record("sliced and exported another project on the same worker", { iteration });
+  }
+
   state.completed_at = new Date().toISOString();
   state.ok = true;
 } catch (error) {
