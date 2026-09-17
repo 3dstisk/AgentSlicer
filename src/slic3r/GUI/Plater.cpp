@@ -18333,6 +18333,7 @@ bool Plater::save_3mf_for_agent(
         Model                   model;
         DynamicPrintConfig      config;
         PlateDataPtrs           plate_data;
+        std::vector<PlateBBoxData> plate_bboxes;
         std::vector<Preset*>    project_presets;
         BBLProject              project;
         std::string             path;
@@ -18368,6 +18369,14 @@ bool Plater::save_3mf_for_agent(
                 SaveStrategy::WithGcode | SaveStrategy::SkipModel;
         p->partplate_list.store_to_3mf_structure(
             payload->plate_data, include_gcode, plate_index);
+        if (include_gcode) {
+            payload->plate_bboxes.reserve(p->partplate_list.get_plate_count());
+            for (int index = 0; index < p->partplate_list.get_plate_count(); ++index)
+                payload->plate_bboxes.push_back(
+                    p->partplate_list.get_plate(index)->cali_bboxes_data);
+            if (payload->plate_bboxes.size() != payload->plate_data.size())
+                throw std::runtime_error("Orca plate metadata count does not match plate data");
+        }
         payload->project_presets =
             wxGetApp().preset_bundle->get_current_project_embedded_presets();
         payload->project = p->project;
@@ -18385,7 +18394,14 @@ bool Plater::save_3mf_for_agent(
             wxGetApp().preset_bundle->printers.get_edited_preset().get_printer_type(
                 wxGetApp().preset_bundle);
 
-        for (PlateData* plate : payload->plate_data) {
+        for (std::size_t index = 0; index < payload->plate_data.size(); ++index) {
+            PlateData* plate = payload->plate_data[index];
+            PlateBBoxData* plate_bbox = payload->plate_bboxes.empty() ? nullptr :
+                &payload->plate_bboxes[index];
+            if (plate_bbox != nullptr) {
+                plate_bbox->filament_ids.clear();
+                plate_bbox->filament_colors.clear();
+            }
             plate->printer_model_id = printer_model_id;
             plate->nozzle_diameters = nozzle_diameter_string;
             for (auto& filament : plate->slice_filaments_info) {
@@ -18396,6 +18412,10 @@ bool Plater::save_3mf_for_agent(
                     filament_ids == nullptr ? std::string() : filament_ids->get_at(filament.id);
                 filament.color =
                     filament_color == nullptr ? "#FFFFFF" : filament_color->get_at(filament.id);
+                if (plate_bbox != nullptr) {
+                    plate_bbox->filament_ids.push_back(filament.id);
+                    plate_bbox->filament_colors.push_back(filament.color);
+                }
             }
         }
     } catch (const std::exception& error) {
@@ -18425,6 +18445,9 @@ bool Plater::save_3mf_for_agent(
             params.config = &payload->config;
             params.strategy = payload->strategy;
             params.project = &payload->project;
+            params.id_bboxes.reserve(payload->plate_bboxes.size());
+            for (PlateBBoxData& plate_bbox : payload->plate_bboxes)
+                params.id_bboxes.push_back(&plate_bbox);
             params.proFn = [&ctl](int, int, int, bool& cancel) {
                 cancel = ctl.was_canceled();
             };

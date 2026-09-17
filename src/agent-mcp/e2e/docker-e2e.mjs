@@ -1,11 +1,15 @@
 #!/usr/bin/env node
 
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { mkdir, readFile, rm, stat, symlink, truncate, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { basename, resolve } from "node:path";
+import { promisify } from "node:util";
 
 import { Client, StreamableHTTPClientTransport } from "@modelcontextprotocol/client";
+
+const execFileAsync = promisify(execFile);
 
 const endpoint = new URL(
   process.env.AGENT_SLICER_MCP_URL ?? "http://127.0.0.1:8765/mcp",
@@ -1171,8 +1175,10 @@ try {
   await rm(symlinkPath, { force: true });
 
   const gcodeName = "e2e-cube.gcode";
+  const gcode3mfName = "e2e-cube.gcode.3mf";
   const projectName = "e2e-cube.3mf";
   await rm(resolve(outputsDir, gcodeName), { force: true });
+  await rm(resolve(outputsDir, gcode3mfName), { force: true });
   await rm(resolve(outputsDir, projectName), { force: true });
 
   const exportStart = (
@@ -1227,6 +1233,56 @@ try {
     throw new Error(`Invalid overwritten G-code result: ${JSON.stringify(overwrittenExport)}`);
   }
 
+  const gcode3mfStart = (
+    await call(client, "gcode_3mf_export", {
+      project_id: project.project_id,
+      expected_revision: project.revision,
+      slice_job_id: sliceJob.job_id,
+      output_path: gcode3mfName,
+      overwrite: false,
+    })
+  ).value;
+  const gcode3mfExported = await waitForJob(client, gcode3mfStart.job_id);
+  assertSucceededJob(gcode3mfExported, "gcode_3mf_export", project, bootstrapSelection);
+  if (
+    gcode3mfExported.result?.path !== `/outputs/${gcode3mfName}` ||
+    !(gcode3mfExported.result?.bytes > 0) ||
+    gcode3mfExported.result?.slice_job_id !== sliceJob.job_id ||
+    !equalJson(gcode3mfExported.metadata?.config_snapshot, sliceJob.metadata?.config_snapshot)
+  ) {
+    throw new Error(`Invalid G-code 3MF result: ${JSON.stringify(gcode3mfExported)}`);
+  }
+
+  const gcode3mfPath = resolve(outputsDir, gcode3mfName);
+  const { stdout: archiveListing } = await execFileAsync("unzip", ["-Z1", gcode3mfPath]);
+  const archiveEntries = new Set(archiveListing.trim().split("\n"));
+  for (const requiredEntry of [
+    "Metadata/project_settings.config",
+    "Metadata/plate_1.json",
+    "Metadata/plate_1.gcode",
+    "Metadata/plate_1.gcode.md5",
+  ]) {
+    if (!archiveEntries.has(requiredEntry)) {
+      throw new Error(`G-code 3MF archive is missing ${requiredEntry}`);
+    }
+  }
+  const { stdout: plateMetadataSource } = await execFileAsync("unzip", [
+    "-p",
+    gcode3mfPath,
+    "Metadata/plate_1.json",
+  ]);
+  const plateMetadata = JSON.parse(plateMetadataSource);
+  if (
+    !Array.isArray(plateMetadata.bbox_objects) ||
+    plateMetadata.bbox_objects.length === 0 ||
+    !Array.isArray(plateMetadata.filament_ids) ||
+    plateMetadata.filament_ids.length === 0 ||
+    !Array.isArray(plateMetadata.filament_colors) ||
+    plateMetadata.filament_colors.length !== plateMetadata.filament_ids.length
+  ) {
+    throw new Error(`G-code 3MF plate metadata is incomplete: ${plateMetadataSource}`);
+  }
+
   const saveStart = (
     await call(client, "project_save", {
       project_id: project.project_id,
@@ -1269,8 +1325,9 @@ try {
     throw new Error(`Invalid overwritten project result: ${JSON.stringify(overwrittenSave)}`);
   }
 
-  const [gcodeStat, projectStat] = await Promise.all([
+  const [gcodeStat, gcode3mfStat, projectStat] = await Promise.all([
     stat(resolve(outputsDir, gcodeName)),
+    stat(gcode3mfPath),
     stat(resolve(outputsDir, projectName)),
   ]);
   if (!gcodeStat.isFile() || gcodeStat.size === 0) {
@@ -1278,6 +1335,9 @@ try {
   }
   if (!projectStat.isFile() || projectStat.size === 0) {
     throw new Error("Saved 3MF is missing or empty");
+  }
+  if (!gcode3mfStat.isFile() || gcode3mfStat.size === 0) {
+    throw new Error("Exported G-code 3MF is missing or empty");
   }
 
   const outputHeaders = { authorization: `Bearer ${token}` };
@@ -1293,6 +1353,7 @@ try {
   if (
     !Array.isArray(outputIndex.outputs) ||
     !outputIndex.outputs.includes(`/outputs/${gcodeName}`) ||
+    !outputIndex.outputs.includes(`/outputs/${gcode3mfName}`) ||
     !outputIndex.outputs.includes(`/outputs/${projectName}`)
   ) {
     throw new Error(`Output index omitted generated files: ${JSON.stringify(outputIndex)}`);
@@ -1300,6 +1361,7 @@ try {
 
   for (const [filename, expectedSize] of [
     [gcodeName, gcodeStat.size],
+    [gcode3mfName, gcode3mfStat.size],
     [projectName, projectStat.size],
   ]) {
     const response = await fetch(new URL(`outputs/${filename}`, baseUrl), {
@@ -1317,8 +1379,9 @@ try {
       );
     }
   }
-  record("exported non-empty G-code and 3MF with overwrite and path protections", {
+  record("exported valid G-code and 3MF artifacts with overwrite and path protections", {
     gcode_bytes: gcodeStat.size,
+    gcode_3mf_bytes: gcode3mfStat.size,
     project_bytes: projectStat.size,
   });
 
