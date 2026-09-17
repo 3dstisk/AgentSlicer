@@ -1,6 +1,7 @@
 #ifndef NOFITPOLY_HPP
 #define NOFITPOLY_HPP
 
+#include <algorithm>
 #include <cassert>
 
 // For parallel for
@@ -1149,6 +1150,17 @@ private:
                 Vertex ref_projected = projection_onto(nfps, ref_aligned);
                 d +=  (ref_projected - ref_aligned);
             }
+        }
+        // Infinite beds are undefined. Clamp finite beds only when the pile can fit.
+        if (bbin.defined && bb.width() <= bbin.width() && bb.height() <= bbin.height()) {
+            setX(d, std::clamp(
+                getX(d),
+                getX(bbin.minCorner()) - getX(bb.minCorner()),
+                getX(bbin.maxCorner()) - getX(bb.maxCorner())));
+            setY(d, std::clamp(
+                getY(d),
+                getY(bbin.minCorner()) - getY(bb.minCorner()),
+                getY(bbin.maxCorner()) - getY(bb.maxCorner())));
         }
         for(Item& item : items_)
             if (!item.is_virt_object)

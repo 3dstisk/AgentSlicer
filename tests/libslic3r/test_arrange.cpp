@@ -24,6 +24,20 @@ ArrangePolygon make_square(coord_t side)
     return ap;
 }
 
+ArrangePolygon make_rectangle(double width_mm, double height_mm)
+{
+    ArrangePolygon ap;
+    Polygon        p;
+    p.points = {
+        Point(0, 0),
+        Point(scaled(width_mm), 0),
+        Point(scaled(width_mm), scaled(height_mm)),
+        Point(0, scaled(height_mm))};
+    ap.poly    = ExPolygon(p);
+    ap.bed_idx = 0;
+    return ap;
+}
+
 ArrangePolygons squares(int n, double side_mm)
 {
     ArrangePolygons items;
@@ -221,4 +235,27 @@ TEST_CASE("Arrange aligns the pile to a custom center", "[Arrange]")
     for (const ArrangePolygon &ap : items)
         REQUIRE(ap.bed_idx == 0);
     require_no_overlap(items);
+}
+
+TEST_CASE("Custom alignment keeps a fitting item within the bed", "[Arrange][Regression]")
+{
+    constexpr double bed_size_mm   = 180.;
+    constexpr double item_width_mm = 111.24;
+
+    ArrangePolygons items{make_rectangle(item_width_mm, 114.433)};
+    ArrangeParams   params = quiet_params();
+    params.align_center    = Vec2d(0.7, 0.5);
+
+    const BoundingBox print_bed = bed(bed_size_mm, bed_size_mm);
+    arrange(items, print_bed, params);
+
+    const BoundingBox arranged_bounds = items.front().transformed_poly().contour.bounding_box();
+    REQUIRE(items.front().bed_idx == 0);
+    REQUIRE(print_bed.contains(arranged_bounds));
+    REQUIRE_THAT(double(arranged_bounds.center().x()),
+                 Catch::Matchers::WithinAbs(double(scaled(bed_size_mm - item_width_mm / 2.)),
+                                            double(scaled(0.001))));
+    REQUIRE_THAT(double(arranged_bounds.center().y()),
+                 Catch::Matchers::WithinAbs(double(scaled(bed_size_mm / 2.)),
+                                            double(scaled(0.001))));
 }
