@@ -1112,7 +1112,24 @@ private:
         default: ; // DONT_ALIGN
         }
 
-        auto d = cb - ci;       
+        auto d = cb - ci;
+
+        // Keep the pile on the bin. Centring it on a target near an edge (a belt
+        // printer starts its parts at the leading end of the belt) would push a pile
+        // larger than the room around that point off the bed, so it stops at the
+        // edge instead; a pile that does not fit along an axis is centred on it.
+        // The items' boxes carry their inflation, which is the margin left at the edge.
+        auto on_bin = [](Coord lo, Coord hi, Coord bin_lo, Coord bin_hi, Coord shift) {
+            if (hi - lo >= bin_hi - bin_lo)
+                return (bin_lo + bin_hi) / 2 - (lo + hi) / 2;
+            if (lo + shift < bin_lo)
+                shift = bin_lo - lo;
+            if (hi + shift > bin_hi)
+                shift = bin_hi - hi;
+            return shift;
+        };
+        setX(d, on_bin(getX(bb.minCorner()), getX(bb.maxCorner()), getX(bbin.minCorner()), getX(bbin.maxCorner()), getX(d)));
+        setY(d, on_bin(getY(bb.minCorner()), getY(bb.maxCorner()), getY(bbin.minCorner()), getY(bbin.maxCorner()), getY(d)));
 
         // BBS make sure the item won't clash with excluded regions
         // do we have wipe tower after arranging?
@@ -1141,26 +1158,13 @@ private:
                 return;
             }
             Item   objs_convex_hull_item(objs_convex_hull);
-            Vertex objs_convex_hull_ref = objs_convex_hull_item.referenceVertex();
-            Vertex diff                 = objs_convex_hull_ref - sl::boundingBox(objs_convex_hull).center();
-            Vertex ref_aligned = cb + diff;  // reference point when pile center aligned with bed center
+            Vertex ref_aligned = objs_convex_hull_item.referenceVertex() + d;
             bool ref_aligned_is_ok = std::any_of(nfps.begin(), nfps.end(), [&ref_aligned](auto& nfp) {return sl::isInside(ref_aligned, nfp); });
             if (!ref_aligned_is_ok) {
                 // ref_aligned is not good, then find a nearest point on nfp boundary
                 Vertex ref_projected = projection_onto(nfps, ref_aligned);
                 d +=  (ref_projected - ref_aligned);
             }
-        }
-        // Infinite beds are undefined. Clamp finite beds only when the pile can fit.
-        if (bbin.defined && bb.width() <= bbin.width() && bb.height() <= bbin.height()) {
-            setX(d, std::clamp(
-                getX(d),
-                getX(bbin.minCorner()) - getX(bb.minCorner()),
-                getX(bbin.maxCorner()) - getX(bb.maxCorner())));
-            setY(d, std::clamp(
-                getY(d),
-                getY(bbin.minCorner()) - getY(bb.minCorner()),
-                getY(bbin.maxCorner()) - getY(bb.maxCorner())));
         }
         for(Item& item : items_)
             if (!item.is_virt_object)

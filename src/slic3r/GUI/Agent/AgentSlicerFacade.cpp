@@ -923,7 +923,7 @@ public:
             PartPlate* plate = plates.get_plate(index);
             int width = 0;
             int depth = 0;
-            int height = 0;
+            double height = 0.0;
             plates.get_plate_size(width, depth, height);
             plate_data.push_back({
                 {"plate_index", index},

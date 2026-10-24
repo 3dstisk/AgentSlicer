@@ -16,6 +16,21 @@ For concurrent agents, use the disposable-worker architecture in
 [the warm container pool guide](../../docs/container-pool.md); never share one
 Orca container between independent agents.
 
+The native source uses OrcaSlicer `v2.5.0-alpha`, a prerelease, with AgentSlicer's
+custom commits merged on top. Keep `origin` pointing to `3dstisk/AgentSlicer` and
+add the official repository as `upstream` in a new clone:
+
+```bash
+git remote add upstream https://github.com/OrcaSlicer/OrcaSlicer.git
+git config remote.upstream.tagOpt --no-tags
+git fetch upstream tag v2.5.0-alpha
+```
+
+For subsequent upgrades, fetch the chosen release tag and merge it on a dedicated
+branch. Preserve the agent integration and its tests when resolving conflicts;
+verify the native unit tests and authenticated Docker E2E before publishing an
+image. Fetching upstream tags does not publish an AgentSlicer release.
+
 Run it locally with a private bearer token:
 
 ```bash

@@ -11,6 +11,8 @@
 OrcaSlicer: an open source Next-Gen Slicing Software for Precision 3D Prints.  
 Optimize your prints with ultra-fast slicing, intelligent support generation, and seamless printer compatibility—engineered for perfection.
 
+This AgentSlicer fork is based on [OrcaSlicer v2.5.0-alpha](https://github.com/OrcaSlicer/OrcaSlicer/releases/tag/v2.5.0-alpha), with the custom MCP server, native agent bridge, and container pool. See the [container guide](docker/agent-slicer/README.md) for building and running AgentSlicer.
+
 # Official links and community
 
 #### Official Website:
@@ -68,6 +70,10 @@ If you come across any of these in search results, please <b>report them</b> as 
   Regular updates fueled by continuous community contributions.
 - **Wide Printer Compatibility**  
   Supports a broad range of printers: Bambu Lab, Prusa, Creality, Voron, and more.
+- **[Belt Printer Support](https://www.orcaslicer.com/wiki/belt_printing)**  
+  Slice for belt / conveyor (infinite-Z) printers, with belt-aware supports and a tilted-bed preview. Contributed by [Joseph Robertson (@HarrierPigeon)](https://github.com/HarrierPigeon).
+- **[IDEX/IQEX Parallel Printing Support](https://www.orcaslicer.com/wiki/idex_iqex_parallel_printing)**  
+  Print copies or mirror images of a part on every carriage of an IDEX or IQEX printer at once, with the mode chosen per plate and nozzle clearance zones shown on the bed. Contributed by [Clifford (@cgarwood82)](https://github.com/cgarwood82).
 - Additional features can be found in the [change notes](https://github.com/OrcaSlicer/OrcaSlicer/releases/).
 
 # Wiki
@@ -82,23 +88,13 @@ The [wiki](https://www.orcaslicer.com/wiki) aims to provide a detailed explanati
 ## Stable Release
 
 📥 **[Download the Latest Stable Release](https://github.com/OrcaSlicer/OrcaSlicer/releases/latest)**  
-Visit our GitHub Releases page for the latest stable version of OrcaSlicer, recommended for most users.
+Visit our GitHub Releases page for the latest stable version of OrcaSlicer, recommended for most users.  
+Windows release binaries are code signed; see our [Code signing policy](#code-signing-policy).
 
 ## Nightly Builds
 
 🌙 **[Download the Latest Nightly Build](https://github.com/OrcaSlicer/OrcaSlicer/releases/tag/nightly-builds)**  
 Explore the latest developments in OrcaSlicer with our nightly builds. Feedback on these versions is highly appreciated.
-
-### Belt Printer Builds
-
-The [nightly release](https://github.com/OrcaSlicer/OrcaSlicer/releases/tag/nightly-builds) ships **two parallel builds**: the standard build and a belt-printer build. Both are attached to the same release — tell them apart by the filename suffix:
-
-- **Standard** — no suffix (e.g. `OrcaSlicer_Windows_Installer_x64_nightly.exe`)
-- **Belt** — `_belt` suffix (e.g. `OrcaSlicer_Windows_Installer_x64_nightly_belt.exe`)
-
-The `_belt` builds add **experimental support for belt / conveyor (infinite-Z) printers**, where the model is sliced against a tilted belt surface instead of a flat horizontal bed. They include ready-to-use belt printer profiles, the full belt slicing pipeline (mesh rotation and G-code transforms), belt-aware support generation, and a tilted-bed preview.
-
-> ⚠️ Belt printer support is under active development and is **not yet merged into `main`** — it currently ships only in these parallel `_belt` builds, produced from the [`belt-printer`](https://github.com/OrcaSlicer/OrcaSlicer/tree/belt-printer) branch. See tracking PR [#14394](https://github.com/OrcaSlicer/OrcaSlicer/pull/14394) and the original documentation in [#12998](https://github.com/OrcaSlicer/OrcaSlicer/pull/12998).
 
 # How to install
 
@@ -118,6 +114,10 @@ Download the **Windows Installer exe** for your preferred version from the [rele
     - [Alternative Download Link Hosted by Microsoft](https://aka.ms/vs/17/release/vc_redist.x64.exe)
     - This file may already be available on your computer if you've installed visual studio.  Check the following location: `%VCINSTALLDIR%Redist\MSVC\v142`
     </details>
+
+### Microsoft Store
+
+Install from the [Microsoft Store](https://apps.microsoft.com/detail/9mv6gl23xm59) when you prefer a Store-signed package (helps on Windows 11 Smart App Control).
 
 ### Windows Package Manager
 
@@ -246,6 +246,16 @@ Open-source slicing has always been built on a tradition of collaboration and at
 OrcaSlicer began in that same spirit, drawing from BambuStudio, PrusaSlicer, and ideas inspired by CuraSlicer and SuperSlicer. But it has since grown far beyond its origins. Through relentless innovation — introducing advanced calibration tools, precise wall and seam control, tree supports, adaptive slicing, and hundreds of other features — OrcaSlicer has become the most widely used and actively developed open-source slicer in the 3D printing community. Many of its innovations have been adopted by other slicers, making it a driving force for the entire industry.
 
 The OrcaSlicer logo was designed by community member [Justin Levine](https://github.com/jal-co).
+
+# Code Signing Policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by [SignPath Foundation](https://signpath.org).
+
+Windows release binaries are built by GitHub Actions from this repository and signed through the SignPath Foundation program. Every signing request is manually approved.
+
+**Team roles:** [SoftFever](https://github.com/SoftFever) is the committer, reviewer and approver for all signed releases.
+
+**Privacy policy:** See the [OrcaSlicer privacy policy](https://www.orcaslicer.com/privacy-policy/).
 
 # License
 

@@ -1,6 +1,7 @@
 #ifndef ORIENTJOB_HPP
 #define ORIENTJOB_HPP
 
+#include <cstddef>
 #include <functional>
 #include <string>
 #include <utility>
@@ -8,6 +9,8 @@
 
 #include "Job.hpp"
 #include "libslic3r/Orient.hpp"
+#include <exception>
+#include "libslic3r/Model.hpp"
 
 namespace Slic3r {
 
