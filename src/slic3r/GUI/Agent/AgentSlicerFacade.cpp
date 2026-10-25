@@ -2917,6 +2917,144 @@ private:
         }
     }
 
+    struct LineTypeStyle
+    {
+        ExtrusionRole role;
+        const char* color;
+    };
+
+    // Orca's preview legend rows in libvgcode order, with libvgcode's default
+    // colors (ViewerImpl DEFAULT_EXTRUSION_ROLES_COLORS / DEFAULT_OPTIONS_COLORS).
+    static nlohmann::json line_type_stats(const GCodeProcessorResult& result,
+                                          const PrintEstimatedStatistics& estimated,
+                                          const PrintConfig& config)
+    {
+        static constexpr std::array<LineTypeStyle, 19> ROLE_STYLES {{
+            {erPerimeter, "#FFE64D"}, {erExternalPerimeter, "#FF7D38"},
+            {erOverhangPerimeter, "#1F1FFF"}, {erInternalInfill, "#B03029"},
+            {erSolidInfill, "#9654CC"}, {erTopSolidInfill, "#F04040"},
+            {erIroning, "#FF8C69"}, {erBridgeInfill, "#4D80BA"},
+            {erGapFill, "#FFFFFF"}, {erSkirt, "#00876E"},
+            {erSupportMaterial, "#00FF00"}, {erSupportMaterialInterface, "#008000"},
+            {erWipeTower, "#B3E3AB"}, {erCustom, "#5ED194"},
+            {erBottomSurface, "#665CC7"}, {erInternalBridgeInfill, "#4D80BA"},
+            {erBrim, "#003B6E"}, {erSupportTransition, "#004000"},
+            {erMixed, "#808080"},
+        }};
+        constexpr std::size_t normal =
+            static_cast<std::size_t>(PrintEstimatedStatistics::ETimeMode::Normal);
+        std::map<ExtrusionRole, double> role_times;
+        constexpr std::size_t move_types = static_cast<std::size_t>(EMoveType::Count);
+        std::array<double, move_types> move_times {};
+        std::array<double, move_types> move_distances {};
+        std::array<std::size_t, move_types> move_counts {};
+        // Same accumulation as GCodeViewer::load and libvgcode's ViewerImpl.
+        for (const GCodeProcessorResult::MoveVertex& move : result.moves) {
+            if (move.internal_only)
+                continue;
+            const std::size_t type = static_cast<std::size_t>(move.type);
+            if (type >= move_types)
+                continue;
+            ++move_counts[type];
+            move_times[type] += move.time[normal];
+            move_distances[type] += move.type == EMoveType::Retract ||
+                    move.type == EMoveType::Unretract ?
+                std::fabs(move.delta_extruder) : move.travel_dist;
+            if (move.type == EMoveType::Extrude)
+                role_times[move.extrusion_role] += move.time[normal];
+        }
+
+        nlohmann::json roles = nlohmann::json::array();
+        for (const LineTypeStyle& style : ROLE_STYLES) {
+            const auto time = role_times.find(style.role);
+            const auto usage = estimated.used_filaments_per_role.find(style.role);
+            if (time == role_times.end() && usage == estimated.used_filaments_per_role.end())
+                continue;
+            roles.push_back({
+                {"key", feature_key(style.role)},
+                {"label", ExtrusionEntity::role_to_string(style.role)},
+                {"color", style.color},
+                {"time_seconds", metric_value(
+                    time == role_times.end() ? 0.0 : time->second, "line_type_time")},
+                {"length_mm", metric_value(
+                    usage == estimated.used_filaments_per_role.end() ? 0.0 :
+                    usage->second.first * 1000.0, "line_type_length")},
+                {"weight_g", metric_value(
+                    usage == estimated.used_filaments_per_role.end() ? 0.0 :
+                    usage->second.second, "line_type_weight")}
+            });
+        }
+
+        const auto option = [](const char* key, const char* label, const char* color,
+                               double time, std::optional<double> distance, std::size_t count) {
+            return nlohmann::json {
+                {"key", key}, {"label", label}, {"color", color},
+                {"time_seconds", metric_value(time, "option_time")},
+                {"distance_mm", distance ? nlohmann::json(metric_value(*distance, "option_distance")) :
+                                           nlohmann::json(nullptr)},
+                {"count", count}
+            };
+        };
+        const auto index = [](EMoveType type) { return static_cast<std::size_t>(type); };
+        nlohmann::json options = nlohmann::json::array();
+        if (estimated.total_travel_moves > 0)
+            options.push_back(option("travel", "Travel", "#38489B",
+                                     move_times[index(EMoveType::Travel)],
+                                     estimated.total_travel_distance,
+                                     estimated.total_travel_moves));
+        const auto counted = [&](const char* key, const char* label, const char* color,
+                                 EMoveType type, bool with_distance) {
+            const std::size_t i = index(type);
+            if (move_counts[i] > 0)
+                options.push_back(option(key, label, color, move_times[i],
+                                         with_distance ? std::optional<double>(move_distances[i]) :
+                                                         std::nullopt,
+                                         move_counts[i]));
+        };
+        counted("wipe", "Wipe", "#FFFF00", EMoveType::Wipe, true);
+        counted("retract", "Retract", "#CD22D6", EMoveType::Retract, true);
+        counted("unretract", "Unretract", "#49ADCF", EMoveType::Unretract, true);
+        {
+            const std::size_t i = index(EMoveType::Seam);
+            const double seam_distance =
+                estimated.total_seam_gap_distance + estimated.total_seam_scarf_distance;
+            if (move_counts[i] > 0)
+                options.push_back(option("seams", "Seams", "#E6E6E6", move_times[i],
+                                         seam_distance > 0.0 ? seam_distance : move_distances[i],
+                                         move_counts[i]));
+        }
+        {
+            // Orca: tool change delays are not on the move vertices.
+            const std::size_t i = index(EMoveType::Tool_change);
+            if (move_counts[i] > 0)
+                options.push_back(option(
+                    "filament_changes", "Filament changes", "#C1BE63",
+                    estimated.total_filament_load_time + estimated.total_filament_unload_time +
+                        estimated.total_tool_change_time,
+                    std::nullopt, move_counts[i]));
+        }
+
+        // Model filament from model volumes per filament, like Orca's legend.
+        double model_length = 0.0;
+        double model_weight = 0.0;
+        for (const auto& [id, volume] : estimated.model_volumes_per_extruder) {
+            const double diameter = id < config.filament_diameter.values.size() ?
+                config.filament_diameter.values[id] : 1.75;
+            const double density = id < config.filament_density.values.size() ?
+                config.filament_density.values[id] : 0.0;
+            model_length += volume / (PI * 0.25 * diameter * diameter);
+            model_weight += volume * density * 0.001;
+        }
+        return {
+            {"roles", std::move(roles)},
+            {"options", std::move(options)},
+            {"model_filament", {
+                {"length_mm", metric_value(model_length, "model_filament_length")},
+                {"weight_g", metric_value(model_weight, "model_filament_weight")}
+            }}
+        };
+    }
+
     nlohmann::json slice_print_metrics(std::size_t plate_index) const
     {
         PartPlateList& plates = m_plater.get_partplate_list();
@@ -3025,7 +3163,8 @@ private:
                     estimated.total_travel_distance, "travel_distance_mm")},
                 {"move_count", estimated.total_travel_moves}
             }},
-            {"initial_tool", totals.initial_tool}
+            {"initial_tool", totals.initial_tool},
+            {"line_types", line_type_stats(*result, estimated, plate->fff_print()->config())}
         };
     }
 

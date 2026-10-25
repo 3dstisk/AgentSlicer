@@ -721,7 +721,7 @@ const descriptions: Record<ToolName, string> = {
   settings_apply:
     "Validate and atomically apply typed JSON setting changes in printer, process, or filament scope (using filament_index for an extruder slot). Float-or-percent values are {value, percent}; points and point groups are nested numeric arrays. dry_run validates the entire batch without mutation.",
   slice_start:
-    "Start slicing one zero-based plate and return immediately with a running job. A successful job includes print time, filament, cost, change, travel, per-extruder, and per-feature metrics with explicit units.",
+    "Start slicing one zero-based plate and return immediately with a running job. A successful job includes print time, filament, cost, change, travel, per-extruder, and per-feature metrics with explicit units, plus Orca's preview line-type legend: per line type time, filament length and weight with Orca's colors, travel/wipe/retract/unretract/seam/filament-change time, distance and count, and model filament.",
   job_get: "Get the current state, progress, result, and error for an asynchronous job.",
   job_cancel:
     "Cancel a running asynchronous job. Cancellation is idempotent: terminal jobs are returned unchanged, while accepted cancellation returns the stable cancelled job snapshot.",
@@ -1221,6 +1221,7 @@ const modelImportJobSchema = z
     result: importResultSchema.nullable(),
   })
   .strict();
+const hexColor = z.string().regex(/^#[0-9A-F]{6}$/);
 const printMetricsSchema = z
   .object({
     time: z
@@ -1279,6 +1280,41 @@ const printMetricsSchema = z
       })
       .strict(),
     initial_tool: unsignedSafeInteger,
+    line_types: z
+      .object({
+        roles: z
+          .array(
+            z
+              .object({
+                key: z.string(),
+                label: z.string(),
+                color: hexColor,
+                time_seconds: z.number().nonnegative(),
+                length_mm: z.number().nonnegative(),
+                weight_g: z.number().nonnegative(),
+              })
+              .strict(),
+          )
+          .max(32),
+        options: z
+          .array(
+            z
+              .object({
+                key: z.enum(["travel", "wipe", "retract", "unretract", "seams", "filament_changes"]),
+                label: z.string(),
+                color: hexColor,
+                time_seconds: z.number().nonnegative(),
+                distance_mm: z.number().nonnegative().nullable(),
+                count: unsignedSafeInteger,
+              })
+              .strict(),
+          )
+          .max(8),
+        model_filament: z
+          .object({ length_mm: z.number().nonnegative(), weight_g: z.number().nonnegative() })
+          .strict(),
+      })
+      .strict(),
   })
   .strict();
 const sliceJobSchema = z

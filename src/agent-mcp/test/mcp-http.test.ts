@@ -1514,6 +1514,16 @@ describe("Streamable HTTP MCP server", () => {
       changes: { tool_changes: 2, filament_changes: 3, extruder_changes: 2 },
       travel: { distance_mm: 40_000, move_count: 900 },
       initial_tool: 0,
+      line_types: {
+        roles: [
+          { key: "inner_wall", label: "Inner wall", color: "#FFE64D", time_seconds: 171, length_mm: 320, weight_g: 0.96 },
+        ],
+        options: [
+          { key: "travel", label: "Travel", color: "#38489B", time_seconds: 693, distance_mm: 58_810, count: 7600 },
+          { key: "filament_changes", label: "Filament changes", color: "#C1BE63", time_seconds: 25, distance_mm: null, count: 1 },
+        ],
+        model_filament: { length_mm: 1700, weight_g: 5.08 },
+      },
     };
     const jobs: Record<string, Record<string, unknown>> = {
       "import-success": {

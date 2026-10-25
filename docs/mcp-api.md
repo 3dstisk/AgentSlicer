@@ -74,7 +74,7 @@ The v1 tool list and order are fixed:
 | `settings_describe` | Discover paginated setting descriptors by scope/query. |
 | `settings_get` | Read typed values for exact setting keys. |
 | `settings_apply` | Atomically validate/apply typed changes; `dry_run: true` validates without mutation. |
-| `slice_start` | Start slicing one zero-based plate and return a job. |
+| `slice_start` | Start slicing one zero-based plate and return a job. The succeeded job's `print_metrics.line_types` holds Orca's preview legend: per line type time, filament length and weight with Orca's colors; travel, wipe, retract, unretract, seam and filament-change time, distance and count; and model filament. |
 | `job_get` | Poll job state, progress, warnings, result, error, and revision. |
 | `job_cancel` | Cancel a running job, or return an already-terminal job unchanged. |
 | `gcode_export` | Publish a successful slice as one root-level `.gcode` file under `/outputs`. |
