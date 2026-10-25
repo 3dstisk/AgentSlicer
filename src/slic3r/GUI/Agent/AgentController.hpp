@@ -117,6 +117,7 @@ private:
     nlohmann::json get_object_settings(const nlohmann::json& params) const;
     nlohmann::json apply_object_settings(const nlohmann::json& params);
     nlohmann::json set_filament_color(const nlohmann::json& params);
+    nlohmann::json edit_filament_slots(const std::string& method, const nlohmann::json& params);
     nlohmann::json render_scene(const nlohmann::json& params);
     nlohmann::json render_toolpaths(const nlohmann::json& params);
     nlohmann::json desktop_capture(const nlohmann::json& params) const;

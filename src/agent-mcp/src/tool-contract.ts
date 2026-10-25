@@ -428,6 +428,13 @@ export const toolSchemas = {
       color: z.string().regex(/^#[0-9A-Fa-f]{6}$/, "color must be #RRGGBB"),
     })
     .strict(),
+  filament_add: z.object(projectWithRevision).strict(),
+  filament_delete: z
+    .object({
+      ...projectWithRevision,
+      index: z.number().int().min(0).max(63).describe("Zero-based filament slot (filaments_get) to remove"),
+    })
+    .strict(),
   bed_type_set: z
     .object({ ...projectWithRevision, bed_type: z.string().min(1).max(64) })
     .strict(),
@@ -615,6 +622,8 @@ export const toolNames = [
   "bed_type_set",
   "filaments_get",
   "filament_color_set",
+  "filament_add",
+  "filament_delete",
   "process_get",
   "object_settings_get",
   "object_settings_apply",
@@ -683,6 +692,10 @@ const descriptions: Record<ToolName, string> = {
   filaments_get:
     "Read Orca's sidebar filament section: each zero-based filament slot's preset and #RRGGBB color, the visible filament presets with vendor, type, system/user origin and printer compatibility, and whether presets have unsaved edits. Change slot presets with presets_select filaments (one name per slot).",
   filament_color_set: "Set one zero-based filament slot's solid #RRGGBB color like Orca's color picker.",
+  filament_add:
+    "Add one filament slot like Orca's add filament button: it copies the last slot's preset, takes Orca's next palette color, and returns its zero-based index.",
+  filament_delete:
+    "Remove one zero-based filament slot like Orca's remove filament button (the last slot cannot be removed). Objects, parts and plates that used it move to Orca's default, and later slots shift down by one.",
   object_settings_get:
     "Read Orca's object settings tab in Simple mode for one or more object_ids (scene_get): Frequent, then the object-level options of the process pages. Values are the process value with each object's override; modified marks options some object overrides with a different value, mixed marks options whose value differs between the objects. Other fields match process_get.",
   object_settings_apply:
@@ -825,6 +838,7 @@ const processResultSchema = z
     dirty: z.boolean(),
   })
   .strict();
+const filamentAddResultSchema = projectResultSchema.extend({ index: unsignedSafeInteger }).strict();
 const bedTypeResultSchema = projectResultSchema
   .extend({ bed_type: z.string() })
   .strict();
@@ -1861,6 +1875,8 @@ export function createAgentCommands(dependencies: AgentToolDependencies) {
     object_settings_get: defineCommand(toolSchemas.object_settings_get, objectSettingsResultSchema, (params) => bridgeTool(dependencies, "object_settings_get", params, objectSettingsResultSchema)),
     object_settings_apply: defineCommand(toolSchemas.object_settings_apply, projectResultSchema, (params) => bridgeTool(dependencies, "object_settings_apply", params, projectResultSchema)),
     filament_color_set: defineCommand(toolSchemas.filament_color_set, projectResultSchema, (params) => bridgeTool(dependencies, "filament_color_set", params, projectResultSchema)),
+    filament_add: defineCommand(toolSchemas.filament_add, filamentAddResultSchema, (params) => bridgeTool(dependencies, "filament_add", params, filamentAddResultSchema)),
+    filament_delete: defineCommand(toolSchemas.filament_delete, projectResultSchema, (params) => bridgeTool(dependencies, "filament_delete", params, projectResultSchema)),
     bed_type_set: defineCommand(toolSchemas.bed_type_set, bedTypeResultSchema, (params) => bridgeTool(dependencies, "bed_type_set", params, bedTypeResultSchema)),
     plate_move_to_front: defineCommand(toolSchemas.plate_move_to_front, plateResultSchema, (params) => bridgeTool(dependencies, "plate_move_to_front", params, plateResultSchema)),
     scene_render: defineCommand(toolSchemas.scene_render, mcpRenderResultSchema, (params) => sceneRender(dependencies, params)),

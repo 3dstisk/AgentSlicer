@@ -186,6 +186,15 @@ public:
         object_settings_calls.push_back(
             {{"object_ids", object_ids}, {"changes", changes}, {"reset_keys", reset_keys}});
     }
+    std::size_t add_filament() override { return filament_slots++; }
+    void delete_filament(std::size_t index) override
+    {
+        if (filament_slots <= 1)
+            throw AgentError(ErrorCode::InvalidRequest, "The last filament cannot be removed");
+        if (index >= filament_slots)
+            throw AgentError(ErrorCode::InvalidRequest, "Filament slot does not exist");
+        --filament_slots;
+    }
     void set_filament_color(std::size_t index, const std::string& color) override
     {
         if (index != 0)
@@ -441,6 +450,7 @@ public:
     std::vector<InstanceTarget> deleted;
     std::string filament_color = "#F2754E";
     std::vector<nlohmann::json> object_settings_calls;
+    std::size_t filament_slots = 1;
     std::vector<InstanceTarget> mirrored;
     int mirror_axis {-1};
     std::pair<std::string, std::string> renamed;
@@ -1437,6 +1447,35 @@ TEST_CASE("Object settings read per object and overrides advance the revision", 
                                          {{"project_id", project["project_id"]},
                                           {"object_ids", {"object_1"}},
                                           {"reset_keys", {"wall_loops"}}}}),
+                      AgentError);
+}
+
+TEST_CASE("Filament slots are added and removed with revision checks", "[AgentBridge]")
+{
+    auto facade = std::make_shared<FakeFacade>();
+    AgentController controller(facade);
+    const auto project = controller.handle({"create", "project_create", {}});
+    const auto added = controller.handle(
+        {"add", "filament_add", {{"project_id", project["project_id"]},
+                                 {"expected_revision", project["revision"]}}});
+    REQUIRE(added["index"] == 1);
+    REQUIRE(added["revision"] == project["revision"].get<int>() + 1);
+    REQUIRE(facade->filament_slots == 2);
+    REQUIRE_THROWS_AS(controller.handle({"stale", "filament_add",
+                                         {{"project_id", project["project_id"]}}}),
+                      AgentError);
+    REQUIRE_THROWS_AS(controller.handle({"missing", "filament_delete",
+                                         {{"project_id", project["project_id"]},
+                                          {"expected_revision", added["revision"]}}}),
+                      AgentError);
+    const auto removed = controller.handle(
+        {"delete", "filament_delete", {{"project_id", project["project_id"]},
+                                       {"expected_revision", added["revision"]}, {"index", 1}}});
+    REQUIRE(removed["revision"] == added["revision"].get<int>() + 1);
+    REQUIRE(facade->filament_slots == 1);
+    REQUIRE_THROWS_AS(controller.handle({"last", "filament_delete",
+                                         {{"project_id", project["project_id"]},
+                                          {"expected_revision", removed["revision"]}, {"index", 0}}}),
                       AgentError);
 }
 

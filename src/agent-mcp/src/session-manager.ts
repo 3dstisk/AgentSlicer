@@ -34,6 +34,8 @@ const MUTATIONS = new Set([
   "plate_move_to_front",
   "bed_type_set",
   "filament_color_set",
+  "filament_add",
+  "filament_delete",
   "presets_select",
   "settings_apply",
   "object_settings_apply",

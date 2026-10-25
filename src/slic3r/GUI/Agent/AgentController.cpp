@@ -410,6 +410,8 @@ nlohmann::json AgentController::handle_prepared(const PreparedRequest& prepared)
             return apply_object_settings(request.params);
         if (request.method == "filament_color_set")
             return set_filament_color(request.params);
+        if (request.method == "filament_add" || request.method == "filament_delete")
+            return edit_filament_slots(request.method, request.params);
         if (request.method == "scene_render")
             return render_scene(request.params);
         if (request.method == "toolpath_render")
@@ -756,7 +758,8 @@ nlohmann::json AgentController::status() const
                           "plate_arrange", "plate_rename", "plate_delete", "plate_lock",
                           "plate_move_to_front", "printer_get", "bed_type_set",
                           "object_delete", "object_mirror", "object_rename",
-                          "filaments_get", "filament_color_set", "object_filament_set",
+                          "filaments_get", "filament_color_set", "filament_add", "filament_delete",
+                          "object_filament_set",
                           "process_get", "object_settings_get", "object_settings_apply",
                           "scene_render",
                           "toolpath_render",
@@ -1133,6 +1136,25 @@ nlohmann::json AgentController::set_filament_color(const nlohmann::json& params)
     m_facade->set_filament_color(index, color);
     ++m_revision;
     return {{"project_id", *m_project_id}, {"revision", m_revision}};
+}
+
+nlohmann::json AgentController::edit_filament_slots(const std::string& method,
+                                                    const nlohmann::json& params)
+{
+    if (!params.contains("expected_revision"))
+        throw AgentError(ErrorCode::InvalidRequest, "expected_revision is required");
+    const std::size_t index = method == "filament_delete" ? require_index(params, "index") : 0;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    require_active_project(params);
+    require_no_active_mutation("Cannot change filament slots while a mutating job is active");
+    nlohmann::json result {{"project_id", *m_project_id}};
+    if (method == "filament_add")
+        result["index"] = m_facade->add_filament();
+    else
+        m_facade->delete_filament(index);
+    ++m_revision;
+    result["revision"] = m_revision;
+    return result;
 }
 
 nlohmann::json AgentController::set_bed_type(const nlohmann::json& params)

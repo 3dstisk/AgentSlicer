@@ -2118,6 +2118,32 @@ public:
                 {"dirty", presets_are_dirty(bundle)}};
     }
 
+    std::size_t add_filament() override
+    {
+        assert_gui_thread();
+        const auto& presets = wxGetApp().preset_bundle->filament_presets;
+        if (presets.size() >= MAXIMUM_EXTRUDER_NUMBER)
+            throw AgentError(ErrorCode::InvalidRequest, "The project already has the most filaments",
+                             {{"max", MAXIMUM_EXTRUDER_NUMBER}});
+        // Same as Orca's add button: next palette color, project slot arrays,
+        // plates, flushing volumes and the process tab follow.
+        m_plater.sidebar().add_filament();
+        return presets.size() - 1;
+    }
+
+    void delete_filament(std::size_t index) override
+    {
+        assert_gui_thread();
+        const std::size_t count = wxGetApp().preset_bundle->filament_presets.size();
+        if (count <= 1)
+            throw AgentError(ErrorCode::InvalidRequest, "The last filament cannot be removed");
+        if (index >= count)
+            throw AgentError(ErrorCode::InvalidRequest, "Filament slot does not exist",
+                             {{"index", index}, {"slots", count}});
+        // Orca remaps objects and plates that used the removed slot.
+        m_plater.sidebar().delete_filament(index);
+    }
+
     void set_filament_color(std::size_t index, const std::string& color) override
     {
         assert_gui_thread();

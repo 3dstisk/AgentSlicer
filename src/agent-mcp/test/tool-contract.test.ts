@@ -32,6 +32,8 @@ describe("MCP tool schemas", () => {
       "bed_type_set",
       "filaments_get",
       "filament_color_set",
+      "filament_add",
+      "filament_delete",
       "process_get",
       "object_settings_get",
       "object_settings_apply",
@@ -92,6 +94,10 @@ describe("MCP tool schemas", () => {
   it("requires a slot index and #RRGGBB for filament colors", () => {
     const base = { project_id: "project_1", expected_revision: 2, index: 0 };
     expect(toolSchemas.filament_color_set.safeParse({ ...base, color: "#f2754e" }).success).toBe(true);
+    expect(toolSchemas.filament_add.safeParse({ project_id: "project_1", expected_revision: 2 }).success).toBe(true);
+    expect(toolSchemas.filament_add.safeParse({ project_id: "project_1" }).success).toBe(false);
+    expect(toolSchemas.filament_delete.safeParse(base).success).toBe(true);
+    expect(toolSchemas.filament_delete.safeParse({ ...base, index: 64 }).success).toBe(false);
     for (const color of ["f2754e", "#f2754", "#GG754E", "red"])
       expect(toolSchemas.filament_color_set.safeParse({ ...base, color }).success).toBe(false);
     expect(toolSchemas.filaments_get.safeParse({ project_id: "project_1" }).success).toBe(true);

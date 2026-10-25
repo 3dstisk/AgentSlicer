@@ -97,6 +97,10 @@ public:
                                        const std::vector<std::string>& reset_keys) = 0;
     /** Sets one slot's solid color (#RRGGBB) like Orca's filament color picker. */
     virtual void set_filament_color(std::size_t index, const std::string& color) = 0;
+    // Orca's sidebar add filament button; returns the new zero-based slot.
+    virtual std::size_t add_filament() = 0;
+    // Orca's sidebar filament removal for one zero-based slot.
+    virtual void delete_filament(std::size_t index) = 0;
     virtual nlohmann::json settings_describe(const nlohmann::json& request) const = 0;
     virtual nlohmann::json settings_get(const nlohmann::json& request) const = 0;
     virtual nlohmann::json settings_apply(const nlohmann::json& request) = 0;
