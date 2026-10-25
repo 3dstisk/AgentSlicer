@@ -324,7 +324,27 @@ export const toolSchemas = {
         .optional(),
     })
     .strict(),
-  scene_arrange: z.object(projectWithRevision).strict(),
+  scene_arrange: z
+    .object({ ...projectWithRevision, plate_index: unsignedSafeInteger.optional() })
+    .strict(),
+  plate_add: z.object(projectWithRevision).strict(),
+  plate_rename: z
+    .object({
+      ...projectWithRevision,
+      plate_index: unsignedSafeInteger,
+      // Orca's plate name editor limit.
+      name: z.string().max(250),
+    })
+    .strict(),
+  plate_delete: z
+    .object({ ...projectWithRevision, plate_index: unsignedSafeInteger })
+    .strict(),
+  plate_lock: z
+    .object({ ...projectWithRevision, plate_index: unsignedSafeInteger, locked: z.boolean() })
+    .strict(),
+  plate_move_to_front: z
+    .object({ ...projectWithRevision, plate_index: unsignedSafeInteger })
+    .strict(),
   presets_list: z
     .object({
       ...projectSnapshot,
@@ -496,6 +516,11 @@ export const toolNames = [
   "object_transform",
   "object_auto_orient",
   "scene_arrange",
+  "plate_add",
+  "plate_rename",
+  "plate_delete",
+  "plate_lock",
+  "plate_move_to_front",
   "scene_render",
   "toolpath_render",
   "desktop_capture",
@@ -541,7 +566,14 @@ const descriptions: Record<ToolName, string> = {
   object_transform: "Move, rotate, scale, or place one model instance on the bed.",
   object_auto_orient:
     "Start Orca's native auto-orient operation for exact object/instance targets, or every printable unlocked instance when targets are omitted. Successful targets are placed on the bed.",
-  scene_arrange: "Start Orca's native arrange operation for the active project.",
+  scene_arrange:
+    "Start Orca's native arrange operation for every plate, or only the zero-based plate_index like Orca's plate arrange icon. Locked plates are skipped.",
+  plate_add: "Add an empty plate like Orca's Add Plate toolbar action and return its zero-based plate_index.",
+  plate_rename: "Rename one zero-based plate. An empty name shows as Untitled in Orca.",
+  plate_delete:
+    "Remove one zero-based plate like Orca's plate icon. Its instances move off the plates; the last plate cannot be removed.",
+  plate_lock: "Lock or unlock one zero-based plate. Arrange and auto-orient skip locked plates.",
+  plate_move_to_front: "Move one zero-based plate to index 0 together with its instances, like Orca's plate icon.",
   scene_render:
     "Render one to six clean PNG views of the active scene as inline MCP image content. Returned paths are internal identifiers, not HTTP URLs.",
   toolpath_render:
@@ -572,6 +604,9 @@ const descriptions: Record<ToolName, string> = {
 };
 
 const projectResultSchema = z.object({ project_id: opaqueId, revision }).strict();
+const plateResultSchema = projectResultSchema
+  .extend({ plate_index: unsignedSafeInteger })
+  .strict();
 const boundsSchema = z
   .object({
     min_mm: z.array(z.number().finite()).length(3),
@@ -597,6 +632,8 @@ const sceneResultSchema = z
             offset_mm: z.array(z.number().finite()).length(3),
             rotation_deg: z.array(z.number().finite()).length(3),
             scale: z.array(z.number().positive().finite()).length(3),
+            // Canonical form R * S * Mx; absent from images without it.
+            mirrored: z.boolean().optional(),
             bounds: boundsSchema,
             plate_index: z.number().int(),
           }).strict(),
@@ -607,6 +644,8 @@ const sceneResultSchema = z
       z.object({
         plate_index: z.number().int().nonnegative(),
         name: z.string(),
+        // Absent from native images that do not advertise plate_lock.
+        locked: z.boolean().optional(),
         origin_mm: z.array(z.number().finite()).length(3).nullable(),
         size_mm: z.array(z.number().finite()).length(3),
       }).strict(),
@@ -1582,6 +1621,11 @@ export function createAgentCommands(dependencies: AgentToolDependencies) {
       runningJobStartResultSchema,
     )),
     scene_arrange: defineCommand(toolSchemas.scene_arrange, runningJobStartResultSchema, (params) => bridgeTool(dependencies, "scene_arrange", params, runningJobStartResultSchema)),
+    plate_add: defineCommand(toolSchemas.plate_add, plateResultSchema, (params) => bridgeTool(dependencies, "plate_add", params, plateResultSchema)),
+    plate_rename: defineCommand(toolSchemas.plate_rename, plateResultSchema, (params) => bridgeTool(dependencies, "plate_rename", params, plateResultSchema)),
+    plate_delete: defineCommand(toolSchemas.plate_delete, plateResultSchema, (params) => bridgeTool(dependencies, "plate_delete", params, plateResultSchema)),
+    plate_lock: defineCommand(toolSchemas.plate_lock, plateResultSchema, (params) => bridgeTool(dependencies, "plate_lock", params, plateResultSchema)),
+    plate_move_to_front: defineCommand(toolSchemas.plate_move_to_front, plateResultSchema, (params) => bridgeTool(dependencies, "plate_move_to_front", params, plateResultSchema)),
     scene_render: defineCommand(toolSchemas.scene_render, mcpRenderResultSchema, (params) => sceneRender(dependencies, params)),
     toolpath_render: defineCommand(toolSchemas.toolpath_render, mcpToolpathRenderResultSchema, (params) => toolpathRender(dependencies, params)),
     desktop_capture: defineCommand(toolSchemas.desktop_capture, desktopResultSchema, (params) => desktopCapture(dependencies, params)),

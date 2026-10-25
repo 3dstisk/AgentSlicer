@@ -23,6 +23,11 @@ const MUTATIONS = new Set([
   "object_transform",
   "object_auto_orient",
   "scene_arrange",
+  "plate_add",
+  "plate_rename",
+  "plate_delete",
+  "plate_lock",
+  "plate_move_to_front",
   "presets_select",
   "settings_apply",
 ]);

@@ -41,7 +41,16 @@ public:
     virtual void transform_object(const nlohmann::json& transform) = 0;
     virtual void start_auto_orient(const nlohmann::json& request) = 0;
     virtual FacadeJobState auto_orient_state() const = 0;
-    virtual void start_arrange() = 0;
+    /** Arranges every plate, or only `plate_index` like Orca's plate icon. */
+    virtual void start_arrange(std::optional<std::size_t> plate_index) = 0;
+    /** Adds an empty plate like Orca's toolbar; returns its zero-based index. */
+    virtual int add_plate() = 0;
+    virtual void rename_plate(std::size_t plate_index, const std::string& name) = 0;
+    /** Removes a plate like Orca's plate icon; its instances move off the plates. */
+    virtual void delete_plate(std::size_t plate_index) = 0;
+    /** Locked plates are skipped by arrange and auto-orient. */
+    virtual void lock_plate(std::size_t plate_index, bool locked) = 0;
+    virtual void move_plate_to_front(std::size_t plate_index) = 0;
     virtual FacadeJobState arrange_state() const = 0;
     virtual nlohmann::json render_scene(const nlohmann::json& request,
                                         const std::filesystem::path& screenshot_root) = 0;

@@ -3,6 +3,7 @@
 #include "slic3r/GUI/Agent/AgentBridge.hpp"
 #include "slic3r/GUI/Agent/AgentSceneGeometry.hpp"
 #include "slic3r/GUI/Agent/AgentImportLimits.hpp"
+#include "slic3r/GUI/Agent/AgentInstanceTransform.hpp"
 #include "slic3r/GUI/Agent/AgentController.hpp"
 #include "slic3r/GUI/Agent/AgentProtocol.hpp"
 #include "slic3r/GUI/Agent/AgentProcessTracker.hpp"
@@ -23,6 +24,9 @@
 #include <memory>
 #include <mutex>
 #include <limits>
+#include <map>
+#include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -119,12 +123,52 @@ public:
             state.result["scene_fingerprint"] = auto_orient_owned_fingerprint;
         return state;
     }
-    void start_arrange() override
+    void start_arrange(std::optional<std::size_t> plate_index) override
     {
+        if (plate_index)
+            require_fake_plate(*plate_index);
+        arranged_plate = plate_index;
         arrange_started = true;
         if (on_arrange_start)
             on_arrange_start();
         arrange_owned_fingerprint = fingerprint;
+    }
+    int add_plate() override
+    {
+        if (plate_count >= max_plates)
+            throw AgentError(ErrorCode::InvalidRequest,
+                             "The maximum number of plates is already in use");
+        return plate_count++;
+    }
+    void require_fake_plate(std::size_t plate_index) const
+    {
+        if (plate_index >= static_cast<std::size_t>(plate_count))
+            throw AgentError(ErrorCode::InvalidRequest, "Plate does not exist");
+    }
+    void rename_plate(std::size_t plate_index, const std::string& name) override
+    {
+        require_fake_plate(plate_index);
+        plate_names[plate_index] = name;
+    }
+    void delete_plate(std::size_t plate_index) override
+    {
+        require_fake_plate(plate_index);
+        if (plate_count <= 1)
+            throw AgentError(ErrorCode::InvalidRequest, "The last plate cannot be removed");
+        --plate_count;
+    }
+    void lock_plate(std::size_t plate_index, bool locked) override
+    {
+        require_fake_plate(plate_index);
+        if (locked)
+            locked_plates.insert(plate_index);
+        else
+            locked_plates.erase(plate_index);
+    }
+    void move_plate_to_front(std::size_t plate_index) override
+    {
+        require_fake_plate(plate_index);
+        front_plate = plate_index;
     }
     FacadeJobState arrange_state() const override
     {
@@ -324,6 +368,12 @@ public:
     bool preset_selection_changed {true};
     bool fail_settings_apply {false};
     FacadeJobState next_arrange_state;
+    int plate_count {1};
+    int max_plates {36};
+    std::optional<std::size_t> arranged_plate;
+    std::map<std::size_t, std::string> plate_names;
+    std::set<std::size_t> locked_plates;
+    std::optional<std::size_t> front_plate;
     bool slice_started {false};
     std::optional<std::size_t> last_plate_index;
     FacadeJobState next_slice_state;
@@ -1112,6 +1162,129 @@ TEST_CASE("Transform validation is finite and advances revision exactly once", "
     REQUIRE(scene["revision"] == 2);
 }
 
+TEST_CASE("Adding a plate advances revision and reports its index", "[AgentBridge]")
+{
+    auto facade = std::make_shared<FakeFacade>();
+    AgentController controller(facade);
+    const auto project = controller.handle({"create", "project_create", {}});
+    REQUIRE_THROWS_AS(
+        controller.handle({"missing", "plate_add", {{"project_id", project["project_id"]}}}),
+        AgentError);
+    const auto added = controller.handle(
+        {"add", "plate_add",
+         {{"project_id", project["project_id"]}, {"expected_revision", project["revision"]}}});
+    REQUIRE(added["plate_index"] == 1);
+    REQUIRE(added["revision"] == project["revision"].get<int>() + 1);
+    REQUIRE_THROWS_AS(
+        controller.handle({"stale", "plate_add",
+                           {{"project_id", project["project_id"]},
+                            {"expected_revision", project["revision"]}}}),
+        AgentError);
+
+    facade->max_plates = 2;
+    REQUIRE_THROWS_AS(
+        controller.handle({"full", "plate_add",
+                           {{"project_id", project["project_id"]},
+                            {"expected_revision", added["revision"]}}}),
+        AgentError);
+    const auto scene = controller.handle(
+        {"scene", "scene_get", {{"project_id", project["project_id"]}}});
+    REQUIRE(scene["revision"] == added["revision"]);
+}
+
+TEST_CASE("Instance components round-trip mirrored and plain matrices", "[AgentBridge]")
+{
+    using Slic3r::Matrix3d;
+    using Slic3r::Transform3d;
+    using Slic3r::Vec3d;
+    const Vec3d offset(10.0, -4.0, 2.5);
+    const Matrix3d rotation =
+        (Eigen::AngleAxisd(1.1, Vec3d::UnitZ()) * Eigen::AngleAxisd(-0.2, Vec3d::UnitY()) *
+         Eigen::AngleAxisd(0.3, Vec3d::UnitX()))
+            .toRotationMatrix();
+    const Vec3d scale(1.5, 2.0, 0.5);
+    const auto affine = [&](const Matrix3d& linear) {
+        Transform3d matrix = Transform3d::Identity();
+        matrix.linear() = linear;
+        matrix.translation() = offset;
+        return matrix;
+    };
+
+    // Mirrored along instance Y: the canonical form moves the mirror to X.
+    const Transform3d mirrored =
+        affine(rotation * Vec3d(1.0, -1.0, 1.0).asDiagonal() * 2.0);
+    const InstanceComponents mirrored_parts = instance_components(mirrored);
+    REQUIRE(mirrored_parts.mirrored);
+    REQUIRE_FALSE(mirrored_parts.skewed);
+    REQUIRE(mirrored_parts.scale.isApprox(Vec3d(2.0, 2.0, 2.0), 1e-9));
+    REQUIRE(instance_matrix(offset, mirrored_parts).matrix().isApprox(mirrored.matrix(), 1e-9));
+
+    // Changing rotation and non-uniform scale keeps the mirror.
+    InstanceComponents edited = mirrored_parts;
+    edited.rotation = rotation;
+    edited.scale = scale;
+    const InstanceComponents reread = instance_components(instance_matrix(offset, edited));
+    REQUIRE(reread.mirrored);
+    REQUIRE(reread.scale.isApprox(scale, 1e-9));
+    REQUIRE(reread.rotation.isApprox(rotation, 1e-9));
+
+    // Unmirrored matrices decompose into their rotation and scale.
+    const InstanceComponents plain = instance_components(affine(rotation * scale.asDiagonal()));
+    REQUIRE_FALSE(plain.mirrored);
+    REQUIRE(plain.rotation.isApprox(rotation, 1e-9));
+    REQUIRE(plain.scale.isApprox(scale, 1e-9));
+
+    Matrix3d sheared = Matrix3d::Identity();
+    sheared(0, 1) = 0.4;
+    REQUIRE(instance_components(affine(sheared)).skewed);
+}
+
+TEST_CASE("Plate edits validate plates and advance the revision", "[AgentBridge]")
+{
+    auto facade = std::make_shared<FakeFacade>();
+    AgentController controller(facade);
+    const auto project = controller.handle({"create", "project_create", {}});
+    int revision = project["revision"].get<int>();
+    const auto edit = [&](const std::string& method, nlohmann::json params) {
+        params["project_id"] = project["project_id"];
+        params["expected_revision"] = revision;
+        const auto result = controller.handle({method, method, params});
+        revision = result["revision"].get<int>();
+        return result;
+    };
+
+    REQUIRE(edit("plate_rename", {{"plate_index", 0}, {"name", "Front"}})["revision"] ==
+            project["revision"].get<int>() + 1);
+    REQUIRE(facade->plate_names.at(0) == "Front");
+    REQUIRE_THROWS_AS(edit("plate_rename", {{"plate_index", 0}, {"name", 3}}), AgentError);
+    REQUIRE_THROWS_AS(edit("plate_lock", {{"plate_index", 0}, {"locked", "yes"}}), AgentError);
+    edit("plate_lock", {{"plate_index", 0}, {"locked", true}});
+    REQUIRE(facade->locked_plates.count(0) == 1);
+    REQUIRE_THROWS_AS(edit("plate_delete", {{"plate_index", 0}}), AgentError);
+    REQUIRE_THROWS_AS(edit("plate_move_to_front", {{"plate_index", 4}}), AgentError);
+    REQUIRE_THROWS_AS(edit("plate_delete", {{"plate_index", -1}}), AgentError);
+
+    edit("plate_add", nlohmann::json::object());
+    REQUIRE(edit("plate_move_to_front", {{"plate_index", 1}})["plate_index"] == 1);
+    REQUIRE(facade->front_plate == std::optional<std::size_t>(1));
+    edit("plate_delete", {{"plate_index", 1}});
+    REQUIRE(facade->plate_count == 1);
+
+    const int stale = revision - 1;
+    REQUIRE_THROWS_AS(
+        controller.handle({"stale", "plate_rename",
+                           {{"project_id", project["project_id"]},
+                            {"expected_revision", stale},
+                            {"plate_index", 0}, {"name", "Late"}}}),
+        AgentError);
+    REQUIRE(facade->plate_names.at(0) == "Front");
+
+    controller.handle({"arrange", "scene_arrange",
+                       {{"project_id", project["project_id"]},
+                        {"expected_revision", revision}, {"plate_index", 0}}});
+    REQUIRE(facade->arranged_plate == std::optional<std::size_t>(0));
+}
+
 TEST_CASE("Every native scene mutator requires an expected revision", "[AgentBridge]")
 {
     TestWorkspace workspace;
@@ -1143,6 +1316,13 @@ TEST_CASE("Every native scene mutator requires an expected revision", "[AgentBri
                         {"instance_id", "instance_11"}}}}}});
     requires_revision(
         {"arrange", "scene_arrange", {{"project_id", project["project_id"]}}});
+    requires_revision(
+        {"plate", "plate_add", {{"project_id", project["project_id"]}}});
+    for (const char* method : {"plate_rename", "plate_delete", "plate_lock",
+                               "plate_move_to_front"})
+        requires_revision({"plate", method,
+                           {{"project_id", project["project_id"]}, {"plate_index", 0},
+                            {"name", "Plate"}, {"locked", true}}});
     REQUIRE_FALSE(facade->import_started);
     REQUIRE(facade->last_transform.is_null());
     REQUIRE_FALSE(facade->auto_orient_started);

@@ -44,10 +44,15 @@ The v1 tool list and order are fixed:
 | `upload_prepare` | Create a single-use upload ticket for a named `.stl`, `.obj`, `.3mf`, `.step`, or `.stp` with an exact byte count and SHA-256. |
 | `project_create` | Reset Orca to one empty active project; return `project_id` and new `revision`. |
 | `model_import` | Start import of an `.stl`, `.obj`, `.3mf`, `.step`, or `.stp` from an absolute `/workspace/...` path and return a job. |
-| `scene_get` | Return objects, instances, transforms, bounds, plates, and current revision. |
-| `object_transform` | Apply an absolute or relative position/rotation/scale and optional `place_on_bed`. |
+| `scene_get` | Return objects, instances, transforms, bounds, plates, and current revision. Instance `rotation_deg` and positive `scale` use the canonical form R * S * Mx (Orca Euler order Rz * Ry * Rx); `mirrored` reports the X mirror Mx. |
+| `object_transform` | Apply an absolute or relative position/rotation/scale and optional `place_on_bed`. Rotation and scale keep an instance's mirroring; a skewed instance rejects rotation and scale changes. |
 | `object_auto_orient` | Start native auto-orient for exact object/instance targets, or all printable unlocked instances when targets are omitted. |
-| `scene_arrange` | Start native arrangement and return a job. |
+| `scene_arrange` | Start native arrangement of every plate, or only an optional zero-based `plate_index`, and return a job. Locked plates are skipped. |
+| `plate_add` | Add an empty plate like Orca's Add Plate toolbar action; return the new `revision` and zero-based `plate_index`. Fails when the maximum plate count is in use. |
+| `plate_rename` | Rename a zero-based `plate_index` (up to 250 characters; empty shows as Untitled). |
+| `plate_delete` | Remove a plate like Orca's plate icon; its instances move off the plates. The last plate cannot be removed. |
+| `plate_lock` | Set a plate's `locked` state; arrange and auto-orient skip locked plates. |
+| `plate_move_to_front` | Move a plate and its instances to index 0. |
 | `scene_render` | Render 1–6 unique views: `iso`, `top`, `front`, `rear`, `left`, `right`, `bottom`, or `top_front`; dimensions are 64–2048 pixels. |
 | `toolpath_render` | Render 1–6 line-type-colored views of a successful slice, optionally limited to an inclusive zero-based layer range. |
 | `desktop_capture` | Capture the full Orca desktop for diagnostics, including dialogs. |

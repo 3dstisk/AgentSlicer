@@ -740,7 +740,9 @@ public:
     void show_uv_editor(bool show);
 
     void arrange();
-    bool arrange_for_agent(std::function<void(bool failed, std::string error)> completion);
+    /** Arranges all plates, or only `plate_index` as Orca's plate icon does. */
+    bool arrange_for_agent(std::optional<std::size_t> plate_index,
+                           std::function<void(bool failed, std::string error)> completion);
     bool orient_for_agent(
         std::vector<std::pair<std::size_t, std::size_t>> targets,
         std::function<void(bool failed, std::string error)> completion);
@@ -888,6 +890,7 @@ public:
     //BBS: add an empty plate and switch to it (the toolbar's Add Plate). Returns the new
     // plate index, or -1 when the plate cap is reached.
     int add_plate();
+    int move_plate_to_front(int plate_index);
     //BBS: delete the plate, index= -1 means the current plate
     int delete_plate(int plate_index = -1);
     int duplicate_plate(int plate_index = -1);

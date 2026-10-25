@@ -19,6 +19,11 @@ describe("MCP tool schemas", () => {
       "object_transform",
       "object_auto_orient",
       "scene_arrange",
+      "plate_add",
+      "plate_rename",
+      "plate_delete",
+      "plate_lock",
+      "plate_move_to_front",
       "scene_render",
       "toolpath_render",
       "desktop_capture",
@@ -34,6 +39,34 @@ describe("MCP tool schemas", () => {
       "gcode_3mf_export",
       "project_save",
     ]);
+  });
+
+  it("requires a project revision to add a plate", () => {
+    expect(
+      toolSchemas.plate_add.safeParse({ project_id: "project_1", expected_revision: 2 })
+        .success,
+    ).toBe(true);
+    expect(toolSchemas.plate_add.safeParse({ project_id: "project_1" }).success).toBe(false);
+    expect(
+      toolSchemas.plate_add.safeParse({
+        project_id: "project_1",
+        expected_revision: 2,
+        plate_index: 1,
+      }).success,
+    ).toBe(false);
+  });
+
+  it("requires a revision and plate index for plate edits", () => {
+    const plate = { project_id: "project_1", expected_revision: 2, plate_index: 1 };
+    expect(toolSchemas.plate_rename.safeParse({ ...plate, name: "Front" }).success).toBe(true);
+    expect(toolSchemas.plate_rename.safeParse({ ...plate, name: "x".repeat(251) }).success).toBe(false);
+    expect(toolSchemas.plate_lock.safeParse({ ...plate, locked: true }).success).toBe(true);
+    expect(toolSchemas.plate_lock.safeParse({ ...plate, locked: "yes" }).success).toBe(false);
+    expect(toolSchemas.plate_delete.safeParse(plate).success).toBe(true);
+    expect(toolSchemas.plate_move_to_front.safeParse({ ...plate, plate_index: -1 }).success).toBe(false);
+    expect(toolSchemas.plate_delete.safeParse({ project_id: "project_1", plate_index: 1 }).success).toBe(false);
+    expect(toolSchemas.scene_arrange.safeParse(plate).success).toBe(true);
+    expect(toolSchemas.scene_arrange.safeParse({ project_id: "project_1", expected_revision: 2 }).success).toBe(true);
   });
 
   it("accepts only root-level supported upload filenames and strong checksums", () => {

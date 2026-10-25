@@ -60,6 +60,8 @@ export const geometryManifestSchema = z.object({
     z.object({
       plate_index: z.number().int(),
       name: z.string(),
+      // Absent from native images that do not advertise plate_lock.
+      locked: z.boolean().optional(),
       origin_mm: z.array(z.number().finite()).length(3).nullable(),
       size_mm: z.array(z.number().finite()).length(3),
     }),

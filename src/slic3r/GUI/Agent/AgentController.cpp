@@ -210,6 +210,24 @@ nlohmann::json job_config_snapshot(const nlohmann::json& native_metadata,
     return result;
 }
 
+std::size_t require_plate_index(const nlohmann::json& params)
+{
+    if (!params.contains("plate_index"))
+        throw AgentError(ErrorCode::InvalidRequest, "plate_index is required");
+    const auto& plate_value = params.at("plate_index");
+    const bool unsigned_value = plate_value.is_number_unsigned();
+    const bool signed_value = plate_value.is_number_integer() && !unsigned_value &&
+                              plate_value.get<std::int64_t>() >= 0;
+    if (!unsigned_value && !signed_value)
+        throw AgentError(ErrorCode::InvalidRequest, "plate_index must be an unsigned integer");
+    const std::uint64_t raw_plate = unsigned_value ?
+        plate_value.get<std::uint64_t>() :
+        static_cast<std::uint64_t>(plate_value.get<std::int64_t>());
+    if (raw_plate > std::numeric_limits<std::size_t>::max())
+        throw AgentError(ErrorCode::InvalidRequest, "plate_index is too large");
+    return static_cast<std::size_t>(raw_plate);
+}
+
 } // namespace
 
 AgentController::AgentController(std::shared_ptr<AgentSlicerFacade> facade,
@@ -301,6 +319,11 @@ nlohmann::json AgentController::handle_prepared(const PreparedRequest& prepared)
             return auto_orient_objects(request.params);
         if (request.method == "scene_arrange")
             return arrange_scene(request.params);
+        if (request.method == "plate_add")
+            return add_plate(request.params);
+        if (request.method == "plate_rename" || request.method == "plate_delete" ||
+            request.method == "plate_lock" || request.method == "plate_move_to_front")
+            return edit_plate(request.method, request.params);
         if (request.method == "scene_render")
             return render_scene(request.params);
         if (request.method == "toolpath_render")
@@ -643,7 +666,10 @@ nlohmann::json AgentController::status() const
         {"revision", m_revision},
         {"job_count", m_jobs.size()},
         {"capabilities", {"project_foundation", "model_import", "scene_inspection",
-                          "object_transform", "object_auto_orient", "scene_arrange", "scene_render",
+                          "object_transform", "object_auto_orient", "scene_arrange", "plate_add",
+                          "plate_arrange", "plate_rename", "plate_delete", "plate_lock",
+                          "plate_move_to_front",
+                          "scene_render",
                           "toolpath_render",
                           "desktop_capture", "preset_control", "settings_control",
                           "job_registry", "job_cancel", "slice", "gcode_export",
@@ -847,10 +873,53 @@ nlohmann::json AgentController::auto_orient_objects(const nlohmann::json& params
     return {{"job_id", id}, {"state", job_state_name(m_jobs.at(id).state)}};
 }
 
+nlohmann::json AgentController::add_plate(const nlohmann::json& params)
+{
+    if (!params.contains("expected_revision"))
+        throw AgentError(ErrorCode::InvalidRequest, "expected_revision is required");
+    std::lock_guard<std::mutex> lock(m_mutex);
+    require_active_project(params);
+    require_no_active_mutation("Cannot add a plate while a mutating job is active");
+    const int plate_index = m_facade->add_plate();
+    ++m_revision;
+    return {{"project_id", *m_project_id}, {"revision", m_revision},
+            {"plate_index", plate_index}};
+}
+
+nlohmann::json AgentController::edit_plate(const std::string& method,
+                                           const nlohmann::json& params)
+{
+    if (!params.contains("expected_revision"))
+        throw AgentError(ErrorCode::InvalidRequest, "expected_revision is required");
+    const std::size_t plate_index = require_plate_index(params);
+    std::lock_guard<std::mutex> lock(m_mutex);
+    require_active_project(params);
+    require_no_active_mutation("Cannot change plates while a mutating job is active");
+    if (method == "plate_rename") {
+        if (!params.contains("name") || !params["name"].is_string())
+            throw AgentError(ErrorCode::InvalidRequest, "name must be a string");
+        m_facade->rename_plate(plate_index, params["name"].get<std::string>());
+    } else if (method == "plate_lock") {
+        if (!params.contains("locked") || !params["locked"].is_boolean())
+            throw AgentError(ErrorCode::InvalidRequest, "locked must be a boolean");
+        m_facade->lock_plate(plate_index, params["locked"].get<bool>());
+    } else if (method == "plate_delete") {
+        m_facade->delete_plate(plate_index);
+    } else {
+        m_facade->move_plate_to_front(plate_index);
+    }
+    ++m_revision;
+    return {{"project_id", *m_project_id}, {"revision", m_revision},
+            {"plate_index", plate_index}};
+}
+
 nlohmann::json AgentController::arrange_scene(const nlohmann::json& params)
 {
     if (!params.contains("expected_revision"))
         throw AgentError(ErrorCode::InvalidRequest, "expected_revision is required");
+    std::optional<std::size_t> plate_index;
+    if (params.contains("plate_index"))
+        plate_index = require_plate_index(params);
     std::lock_guard<std::mutex> lock(m_mutex);
     require_active_project(params);
     const std::string id = make_opaque_id("job");
@@ -858,7 +927,7 @@ nlohmann::json AgentController::arrange_scene(const nlohmann::json& params)
     const nlohmann::json native_metadata = m_facade->job_metadata();
     nlohmann::json config_snapshot =
         job_config_snapshot(native_metadata, m_revision);
-    m_facade->start_arrange();
+    m_facade->start_arrange(plate_index);
     // Arrange startup takes an Orca undo snapshot. Baseline that attributed
     // native change immediately so a long-running arrange is not mistaken for
     // an unrelated GUI mutation on its first poll.
@@ -1116,20 +1185,7 @@ nlohmann::json AgentController::start_slice(const nlohmann::json& params)
 {
     if (!params.contains("expected_revision"))
         throw AgentError(ErrorCode::InvalidRequest, "expected_revision is required");
-    if (!params.contains("plate_index"))
-        throw AgentError(ErrorCode::InvalidRequest, "plate_index is required");
-    const auto& plate_value = params.at("plate_index");
-    const bool unsigned_value = plate_value.is_number_unsigned();
-    const bool signed_value = plate_value.is_number_integer() && !unsigned_value &&
-                              plate_value.get<std::int64_t>() >= 0;
-    if (!unsigned_value && !signed_value)
-        throw AgentError(ErrorCode::InvalidRequest, "plate_index must be an unsigned integer");
-    const std::uint64_t raw_plate = unsigned_value ?
-        plate_value.get<std::uint64_t>() :
-        static_cast<std::uint64_t>(plate_value.get<std::int64_t>());
-    if (raw_plate > std::numeric_limits<std::size_t>::max())
-        throw AgentError(ErrorCode::InvalidRequest, "plate_index is too large");
-    const std::optional<std::size_t> plate_index(static_cast<std::size_t>(raw_plate));
+    const std::optional<std::size_t> plate_index(require_plate_index(params));
     std::lock_guard<std::mutex> lock(m_mutex);
     require_active_project(params);
     require_no_active_mutation("Another mutating job is active");

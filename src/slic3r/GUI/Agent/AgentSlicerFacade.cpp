@@ -1,4 +1,5 @@
 #include "AgentSlicerFacade.hpp"
+#include "AgentInstanceTransform.hpp"
 #include "AgentPlateUpdateContext.hpp"
 #include "AgentSceneGeometry.hpp"
 #include "libslic3r/Model.hpp"
@@ -993,13 +994,15 @@ public:
             nlohmann::json instances = nlohmann::json::array();
             for (size_t instance_index = 0; instance_index < object.instances.size(); ++instance_index) {
                 const ModelInstance& instance = *object.instances[instance_index];
-                const Vec3d rotation = instance.get_rotation() * RadiansToDegrees;
+                const InstanceComponents components = instance_components(instance.get_matrix());
                 instances.push_back({
                     {"instance_id", instance_id(instance)},
                     {"instance_index", instance_index},
                     {"offset_mm", vector_json(instance.get_offset())},
-                    {"rotation_deg", vector_json(rotation)},
-                    {"scale", vector_json(instance.get_scaling_factor())},
+                    {"rotation_deg", vector_json(
+                        Geometry::extract_euler_angles(components.rotation) * RadiansToDegrees)},
+                    {"scale", vector_json(components.scale)},
+                    {"mirrored", components.mirrored},
                     {"bounds", bounds_json(object.instance_bounding_box(instance_index))},
                     {"plate_index", plates.find_instance_belongs(
                         static_cast<int>(object_index), static_cast<int>(instance_index))}
@@ -1024,6 +1027,7 @@ public:
             plate_data.push_back({
                 {"plate_index", index},
                 {"name", plate != nullptr ? plate->get_plate_name() : std::string()},
+                {"locked", plate != nullptr && plate->is_locked()},
                 {"origin_mm", plate != nullptr ?
                     vector_json(plate->get_origin()) : nlohmann::json(nullptr)},
                 {"size_mm", nlohmann::json::array({width, depth, height})}
@@ -1064,14 +1068,25 @@ public:
             const Vec3d value = vec(transform["offset_mm"]);
             found_instance->set_offset(relative ? found_instance->get_offset() + value : value);
         }
-        if (transform.contains("rotation_deg")) {
-            const Vec3d value = vec(transform["rotation_deg"]) * DegreesToRadians;
-            found_instance->set_rotation(relative ? found_instance->get_rotation() + value : value);
-        }
-        if (transform.contains("scale")) {
-            const Vec3d value = vec(transform["scale"]);
-            found_instance->set_scaling_factor(
-                relative ? found_instance->get_scaling_factor().cwiseProduct(value) : value);
+        if (transform.contains("rotation_deg") || transform.contains("scale")) {
+            // Rebuild from the canonical components so mirrored instances keep
+            // their mirror exactly; Orca's setters reuse a polar decomposition.
+            InstanceComponents components = instance_components(found_instance->get_matrix());
+            if (components.skewed)
+                throw AgentError(ErrorCode::InvalidRequest,
+                                 "The instance transformation contains skew; rotation and scale cannot be set exactly");
+            if (transform.contains("rotation_deg")) {
+                const Vec3d value = vec(transform["rotation_deg"]) * DegreesToRadians;
+                const Vec3d angles = relative ?
+                    Geometry::extract_euler_angles(components.rotation) + value : value;
+                components.rotation = Geometry::rotation_transform(angles).linear();
+            }
+            if (transform.contains("scale")) {
+                const Vec3d value = vec(transform["scale"]);
+                components.scale = relative ? components.scale.cwiseProduct(value) : value;
+            }
+            found_instance->set_transformation(Geometry::Transformation(
+                instance_matrix(found_instance->get_offset(), components)));
         }
         found_object->invalidate_bounding_box();
         if (transform.value("place_on_bed", false)) {
@@ -1084,6 +1099,63 @@ public:
         ScopedGeometryOnlyPlateUpdate plate_update;
         m_plater.changed_object(found_object_index);
         refresh_plate_membership(static_cast<size_t>(found_object_index));
+    }
+
+    int add_plate() override
+    {
+        assert_gui_thread();
+        ScopedGeometryOnlyPlateUpdate plate_update;
+        const int plate_index = m_plater.add_plate();
+        if (plate_index < 0)
+            throw AgentError(ErrorCode::InvalidRequest,
+                             "The maximum number of plates is already in use");
+        // A grid reflow can move existing plates and their instances.
+        refresh_all_plate_membership();
+        return plate_index;
+    }
+
+    void rename_plate(std::size_t plate_index, const std::string& name) override
+    {
+        assert_gui_thread();
+        PartPlate& plate = require_plate(plate_index);
+        m_plater.take_snapshot("rename partplate");
+        plate.set_plate_name(name);
+    }
+
+    void delete_plate(std::size_t plate_index) override
+    {
+        assert_gui_thread();
+        require_plate(plate_index);
+        if (m_plater.get_partplate_list().get_plate_count() <= 1)
+            throw AgentError(ErrorCode::InvalidRequest, "The last plate cannot be removed");
+        ScopedGeometryOnlyPlateUpdate plate_update;
+        if (m_plater.delete_plate(static_cast<int>(plate_index)) != 0)
+            throw AgentError(ErrorCode::InvalidRequest, "Orca could not remove the plate",
+                             {{"plate_index", plate_index}});
+        refresh_all_plate_membership();
+    }
+
+    void lock_plate(std::size_t plate_index, bool locked) override
+    {
+        assert_gui_thread();
+        PartPlate& plate = require_plate(plate_index);
+        if (plate.is_locked() == locked)
+            return;
+        m_plater.take_snapshot("lock partplate");
+        m_plater.get_partplate_list().lock_plate(static_cast<int>(plate_index), locked);
+    }
+
+    void move_plate_to_front(std::size_t plate_index) override
+    {
+        assert_gui_thread();
+        require_plate(plate_index);
+        if (plate_index == 0)
+            return;
+        ScopedGeometryOnlyPlateUpdate plate_update;
+        if (m_plater.move_plate_to_front(static_cast<int>(plate_index)) != 0)
+            throw AgentError(ErrorCode::InvalidRequest, "Orca could not move the plate",
+                             {{"plate_index", plate_index}});
+        refresh_all_plate_membership();
     }
 
     void start_auto_orient(const nlohmann::json& request) override
@@ -1154,14 +1226,16 @@ public:
         return result;
     }
 
-    void start_arrange() override
+    void start_arrange(std::optional<std::size_t> plate_index) override
     {
         assert_gui_thread();
+        if (plate_index)
+            require_plate(*plate_index);
         if (!m_plater.can_arrange())
             throw AgentError(ErrorCode::MutationInProgress, "Orca cannot arrange the current scene");
         m_arrange_state = std::make_shared<FacadeJobState>();
         std::weak_ptr<FacadeJobState> weak_state = m_arrange_state;
-        if (!m_plater.arrange_for_agent([weak_state](bool failed, std::string error) {
+        if (!m_plater.arrange_for_agent(plate_index, [weak_state](bool failed, std::string error) {
                 if (const auto state = weak_state.lock(); state && !state->complete) {
                     if (failed)
                         *state = {true, true, 1.0, nullptr,
@@ -2078,6 +2152,23 @@ public:
     }
 
 private:
+    PartPlate& require_plate(std::size_t plate_index)
+    {
+        PartPlateList& plates = m_plater.get_partplate_list();
+        PartPlate* plate = plate_index < static_cast<std::size_t>(plates.get_plate_count()) ?
+            plates.get_plate(static_cast<int>(plate_index)) : nullptr;
+        if (plate == nullptr)
+            throw AgentError(ErrorCode::InvalidRequest, "Plate does not exist",
+                             {{"plate_index", plate_index}});
+        return *plate;
+    }
+
+    void refresh_all_plate_membership()
+    {
+        for (size_t index = 0; index < m_plater.model().objects.size(); ++index)
+            refresh_plate_membership(index);
+    }
+
     void refresh_plate_membership(size_t object_index)
     {
         assert_gui_thread();

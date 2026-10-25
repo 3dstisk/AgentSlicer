@@ -22227,11 +22227,16 @@ void Plater::arrange()
     }
 }
 
-bool Plater::arrange_for_agent(std::function<void(bool failed, std::string error)> completion)
+bool Plater::arrange_for_agent(std::optional<std::size_t> plate_index,
+                               std::function<void(bool failed, std::string error)> completion)
 {
     auto& worker = get_ui_job_worker();
     if (!worker.is_idle())
         return false;
+    // ArrangeJob limits itself to the current plate in the menu state.
+    if (plate_index && select_plate(static_cast<int>(*plate_index)) != 0)
+        return false;
+    set_prepare_state(plate_index ? Job::PREPARE_STATE_MENU : Job::PREPARE_STATE_DEFAULT);
     p->take_snapshot(_u8L("Arrange"));
     return replace_job(worker, std::make_unique<ArrangeJob>(true, std::move(completion)));
 }
@@ -23792,15 +23797,7 @@ int Plater::select_plate_by_hover_id(int hover_id, bool right_click, bool isModi
             ret = -1;
         }
     } else if ((action == 7) && (!right_click)) {
-        // move plate to the front
-        take_snapshot("move plate to the front");
-        ret = p->partplate_list.move_plate_to_index(plate_index,0);
-        p->partplate_list.update_slice_context_to_current_plate(p->background_process);
-        p->preview->update_gcode_result(p->partplate_list.get_current_slice_result());
-        p->sidebar->obj_list()->reload_all_plates();
-        p->partplate_list.update_plates();
-        update();
-        p->partplate_list.select_plate(0);
+        ret = move_plate_to_front(plate_index);
     }
     else if (action == (int)PartPlate::PLATE_IMEX_MODE_ID)
     {
@@ -23868,6 +23865,19 @@ int Plater::select_plate_by_hover_id(int hover_id, bool right_click, bool isModi
 }
 
 //BBS: add an empty plate and switch to it (mirrors the toolbar's Add Plate).
+int Plater::move_plate_to_front(int plate_index)
+{
+    take_snapshot("move plate to the front");
+    const int ret = p->partplate_list.move_plate_to_index(plate_index, 0);
+    p->partplate_list.update_slice_context_to_current_plate(p->background_process);
+    p->preview->update_gcode_result(p->partplate_list.get_current_slice_result());
+    p->sidebar->obj_list()->reload_all_plates();
+    p->partplate_list.update_plates();
+    update();
+    p->partplate_list.select_plate(0);
+    return ret;
+}
+
 int Plater::add_plate()
 {
     if (!p->can_add_plate())
