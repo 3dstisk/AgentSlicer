@@ -80,6 +80,17 @@ const projectWithRevision = {
   ...project,
   expected_revision: revision.describe("Reject the operation if the active revision differs"),
 };
+/** Unique object instances, as returned by scene_get. */
+const instanceTargets = z
+  .array(z.object({ object_id: opaqueId, instance_id: opaqueId }).strict())
+  .min(1)
+  .max(1024)
+  .refine(
+    (targets) =>
+      new Set(targets.map((target) => `${target.object_id}\0${target.instance_id}`)).size ===
+      targets.length,
+    "targets must be unique",
+  );
 const projectSnapshot = {
   ...project,
   expected_revision: revision
@@ -316,27 +327,29 @@ export const toolSchemas = {
       { message: "At least one transform field is required" },
     ),
   object_auto_orient: z
+    .object({ ...projectWithRevision, targets: instanceTargets.optional() })
+    .strict(),
+  object_delete: z
+    .object({ ...projectWithRevision, targets: instanceTargets })
+    .strict(),
+  object_mirror: z
     .object({
       ...projectWithRevision,
-      targets: z
-        .array(
-          z
-            .object({
-              object_id: opaqueId,
-              instance_id: opaqueId,
-            })
-            .strict(),
-        )
+      targets: instanceTargets,
+      axis: z.enum(["x", "y", "z"]),
+    })
+    .strict(),
+  object_rename: z
+    .object({
+      ...projectWithRevision,
+      object_id: opaqueId,
+      name: z
+        .string()
         .min(1)
-        .max(1024)
         .refine(
-          (targets) =>
-            new Set(targets.map(
-              (target) => `${target.object_id}\0${target.instance_id}`,
-            )).size === targets.length,
-          "auto-orient targets must be unique",
-        )
-        .optional(),
+          (name) => Buffer.byteLength(name, "utf8") <= 255 && !/[\u0000-\u001f\u007f]/.test(name),
+          "name must be 1 to 255 bytes without control characters",
+        ),
     })
     .strict(),
   scene_arrange: z
@@ -534,6 +547,9 @@ export const toolNames = [
   "scene_get",
   "object_transform",
   "object_auto_orient",
+  "object_delete",
+  "object_mirror",
+  "object_rename",
   "scene_arrange",
   "plate_add",
   "plate_rename",
@@ -587,6 +603,11 @@ const descriptions: Record<ToolName, string> = {
   object_transform: "Move, rotate, scale, or place one model instance on the bed.",
   object_auto_orient:
     "Start Orca's native auto-orient operation for exact object/instance targets, or every printable unlocked instance when targets are omitted. Successful targets are placed on the bed.",
+  object_delete:
+    "Delete object instances like Orca's object list; deleting every instance of an object deletes the object. Objects that are part of a cut are refused.",
+  object_mirror:
+    "Mirror object instances along a world axis around each instance's own center and keep them on the bed, like Orca's Mirror menu.",
+  object_rename: "Rename one object.",
   scene_arrange:
     "Start Orca's native arrange operation for every plate, or only the zero-based plate_index like Orca's plate arrange icon. Locked plates are skipped.",
   plate_add: "Add an empty plate like Orca's Add Plate toolbar action and return its zero-based plate_index.",
@@ -1680,6 +1701,9 @@ export function createAgentCommands(dependencies: AgentToolDependencies) {
       params,
       runningJobStartResultSchema,
     )),
+    object_delete: defineCommand(toolSchemas.object_delete, projectResultSchema, (params) => bridgeTool(dependencies, "object_delete", params, projectResultSchema)),
+    object_mirror: defineCommand(toolSchemas.object_mirror, projectResultSchema, (params) => bridgeTool(dependencies, "object_mirror", params, projectResultSchema)),
+    object_rename: defineCommand(toolSchemas.object_rename, projectResultSchema, (params) => bridgeTool(dependencies, "object_rename", params, projectResultSchema)),
     scene_arrange: defineCommand(toolSchemas.scene_arrange, runningJobStartResultSchema, (params) => bridgeTool(dependencies, "scene_arrange", params, runningJobStartResultSchema)),
     plate_add: defineCommand(toolSchemas.plate_add, plateResultSchema, (params) => bridgeTool(dependencies, "plate_add", params, plateResultSchema)),
     plate_rename: defineCommand(toolSchemas.plate_rename, plateResultSchema, (params) => bridgeTool(dependencies, "plate_rename", params, plateResultSchema)),

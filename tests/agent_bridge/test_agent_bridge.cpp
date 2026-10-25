@@ -160,6 +160,21 @@ public:
         --plate_count;
     }
     nlohmann::json printer_state() const override { return printer; }
+    void delete_instances(const std::vector<InstanceTarget>& targets) override
+    {
+        deleted = targets;
+    }
+    void mirror_instances(const std::vector<InstanceTarget>& targets, int axis) override
+    {
+        mirrored = targets;
+        mirror_axis = axis;
+    }
+    void rename_object(const std::string& id, const std::string& name) override
+    {
+        if (id != "object_10")
+            throw AgentError(ErrorCode::ObjectNotFound, "Object does not exist");
+        renamed = {id, name};
+    }
     void set_bed_type(const std::string& bed_type) override
     {
         if (bed_type != "Textured PEI Plate" && bed_type != "Cool Plate")
@@ -384,6 +399,10 @@ public:
     std::map<std::size_t, std::string> plate_names;
     std::set<std::size_t> locked_plates;
     std::optional<std::size_t> front_plate;
+    std::vector<InstanceTarget> deleted;
+    std::vector<InstanceTarget> mirrored;
+    int mirror_axis {-1};
+    std::pair<std::string, std::string> renamed;
     mutable nlohmann::json printer = {
         {"selected", {{"preset", "Bambu Lab A1 0.4 nozzle"}, {"model", "Bambu Lab A1"},
                       {"variant", "0.4"}, {"system", true}}},
@@ -1286,6 +1305,38 @@ TEST_CASE("Instance components round-trip mirrored and plain matrices", "[AgentB
     REQUIRE(instance_components(affine(sheared)).skewed);
 }
 
+TEST_CASE("Object delete, mirror and rename validate input and advance the revision", "[AgentBridge]")
+{
+    auto facade = std::make_shared<FakeFacade>();
+    AgentController controller(facade);
+    const auto project = controller.handle({"create", "project_create", {}});
+    int revision = project["revision"].get<int>();
+    const auto edit = [&](const std::string& method, nlohmann::json params) {
+        params["project_id"] = project["project_id"];
+        params["expected_revision"] = revision;
+        const auto result = controller.handle({method, method, params});
+        revision = result["revision"].get<int>();
+        return result;
+    };
+    const nlohmann::json target = {{"object_id", "object_10"}, {"instance_id", "instance_11"}};
+
+    edit("object_delete", {{"targets", {target}}});
+    REQUIRE(facade->deleted == std::vector<InstanceTarget>{{"object_10", "instance_11"}});
+    edit("object_mirror", {{"targets", {target}}, {"axis", "y"}});
+    REQUIRE(facade->mirror_axis == 1);
+    edit("object_rename", {{"object_id", "object_10"}, {"name", "Držák"}});
+    REQUIRE(facade->renamed.second == "Držák");
+    REQUIRE(revision == project["revision"].get<int>() + 3);
+
+    REQUIRE_THROWS_AS(edit("object_delete", {{"targets", nlohmann::json::array()}}), AgentError);
+    REQUIRE_THROWS_AS(edit("object_delete", {{"targets", {target, target}}}), AgentError);
+    REQUIRE_THROWS_AS(edit("object_mirror", {{"targets", {target}}, {"axis", "w"}}), AgentError);
+    REQUIRE_THROWS_AS(edit("object_rename", {{"object_id", "object_10"}, {"name", ""}}), AgentError);
+    REQUIRE_THROWS_AS(edit("object_rename", {{"object_id", "object_10"}, {"name", "a\nb"}}), AgentError);
+    REQUIRE_THROWS_AS(edit("object_rename", {{"object_id", "object_99"}, {"name", "x"}}), AgentError);
+    REQUIRE(revision == project["revision"].get<int>() + 3);
+}
+
 TEST_CASE("Printer state reads without a revision and bed type changes advance it", "[AgentBridge]")
 {
     auto facade = std::make_shared<FakeFacade>();
@@ -1398,6 +1449,12 @@ TEST_CASE("Every native scene mutator requires an expected revision", "[AgentBri
         {"arrange", "scene_arrange", {{"project_id", project["project_id"]}}});
     requires_revision(
         {"plate", "plate_add", {{"project_id", project["project_id"]}}});
+    requires_revision({"delete", "object_delete",
+                       {{"project_id", project["project_id"]},
+                        {"targets", {{{"object_id", "object_10"}, {"instance_id", "instance_11"}}}}}});
+    requires_revision({"rename", "object_rename",
+                       {{"project_id", project["project_id"]}, {"object_id", "object_10"},
+                        {"name", "Part"}}});
     requires_revision({"bed", "bed_type_set",
                        {{"project_id", project["project_id"]}, {"bed_type", "Cool Plate"}}});
     for (const char* method : {"plate_rename", "plate_delete", "plate_lock",

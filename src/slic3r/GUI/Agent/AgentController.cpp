@@ -211,6 +211,42 @@ nlohmann::json job_config_snapshot(const nlohmann::json& native_metadata,
     return result;
 }
 
+/** Unique (object_id, instance_id) targets, between one and 1024. */
+std::vector<InstanceTarget> require_instance_targets(const nlohmann::json& params)
+{
+    if (!params.contains("targets"))
+        throw AgentError(ErrorCode::InvalidRequest, "targets is required");
+    const nlohmann::json& targets = params.at("targets");
+    if (!targets.is_array() || targets.empty() || targets.size() > 1024)
+        throw AgentError(ErrorCode::InvalidRequest,
+                         "targets must contain between one and 1024 entries");
+    std::vector<InstanceTarget> result;
+    std::set<InstanceTarget> unique_targets;
+    for (const nlohmann::json& target : targets) {
+        if (!target.is_object() || target.size() != 2 ||
+            !target.contains("object_id") || !target.at("object_id").is_string() ||
+            !target.contains("instance_id") || !target.at("instance_id").is_string())
+            throw AgentError(ErrorCode::InvalidRequest,
+                             "Each target must contain object_id and instance_id strings");
+        InstanceTarget identity(target.at("object_id").get<std::string>(),
+                                target.at("instance_id").get<std::string>());
+        if (!unique_targets.insert(identity).second)
+            throw AgentError(ErrorCode::InvalidRequest, "Targets must be unique");
+        result.push_back(std::move(identity));
+    }
+    return result;
+}
+
+/** An object name: 1 to 255 bytes without control characters. */
+bool is_object_name(const std::string& name)
+{
+    if (name.empty() || name.size() > 255)
+        return false;
+    return std::none_of(name.begin(), name.end(), [](char character) {
+        return static_cast<unsigned char>(character) < 0x20 || character == 0x7f;
+    });
+}
+
 std::size_t require_plate_index(const nlohmann::json& params)
 {
     if (!params.contains("plate_index"))
@@ -331,6 +367,9 @@ nlohmann::json AgentController::handle_prepared(const PreparedRequest& prepared)
             return edit_plate(request.method, request.params);
         if (request.method == "printer_get")
             return get_printer(request.params);
+        if (request.method == "object_delete" || request.method == "object_mirror" ||
+            request.method == "object_rename")
+            return edit_objects(request.method, request.params);
         if (request.method == "bed_type_set")
             return set_bed_type(request.params);
         if (request.method == "scene_render")
@@ -678,6 +717,7 @@ nlohmann::json AgentController::status() const
                           "object_transform", "object_auto_orient", "scene_arrange", "plate_add",
                           "plate_arrange", "plate_rename", "plate_delete", "plate_lock",
                           "plate_move_to_front", "printer_get", "bed_type_set",
+                          "object_delete", "object_mirror", "object_rename",
                           "scene_render",
                           "toolpath_render",
                           "desktop_capture", "preset_control", "settings_control",
@@ -844,26 +884,8 @@ nlohmann::json AgentController::auto_orient_objects(const nlohmann::json& params
 {
     if (!params.contains("expected_revision"))
         throw AgentError(ErrorCode::InvalidRequest, "expected_revision is required");
-    if (params.contains("targets")) {
-        const nlohmann::json& targets = params.at("targets");
-        if (!targets.is_array() || targets.empty() || targets.size() > 1024)
-            throw AgentError(ErrorCode::InvalidRequest,
-                             "targets must contain between one and 1024 entries");
-        std::set<std::pair<std::string, std::string>> unique_targets;
-        for (const nlohmann::json& target : targets) {
-            if (!target.is_object() || target.size() != 2 ||
-                !target.contains("object_id") || !target.at("object_id").is_string() ||
-                !target.contains("instance_id") || !target.at("instance_id").is_string())
-                throw AgentError(ErrorCode::InvalidRequest,
-                                 "Each target must contain object_id and instance_id strings");
-            const auto identity = std::make_pair(
-                target.at("object_id").get<std::string>(),
-                target.at("instance_id").get<std::string>());
-            if (!unique_targets.insert(identity).second)
-                throw AgentError(ErrorCode::InvalidRequest,
-                                 "Auto-orient targets must be unique");
-        }
-    }
+    if (params.contains("targets"))
+        require_instance_targets(params);
 
     std::lock_guard<std::mutex> lock(m_mutex);
     require_active_project(params);
@@ -924,6 +946,45 @@ nlohmann::json AgentController::edit_plate(const std::string& method,
     ++m_revision;
     return {{"project_id", *m_project_id}, {"revision", m_revision},
             {"plate_index", plate_index}};
+}
+
+nlohmann::json AgentController::edit_objects(const std::string& method,
+                                             const nlohmann::json& params)
+{
+    if (!params.contains("expected_revision"))
+        throw AgentError(ErrorCode::InvalidRequest, "expected_revision is required");
+    std::vector<InstanceTarget> targets;
+    int axis = -1;
+    if (method == "object_rename") {
+        if (!params.contains("object_id") || !params["object_id"].is_string())
+            throw AgentError(ErrorCode::InvalidRequest, "object_id must be a string");
+        if (!params.contains("name") || !params["name"].is_string() ||
+            !is_object_name(params["name"].get<std::string>()))
+            throw AgentError(ErrorCode::InvalidRequest,
+                             "name must be 1 to 255 bytes without control characters");
+    } else {
+        targets = require_instance_targets(params);
+        if (method == "object_mirror") {
+            static const std::map<std::string, int> axes {{"x", 0}, {"y", 1}, {"z", 2}};
+            const auto found = params.contains("axis") && params["axis"].is_string() ?
+                axes.find(params["axis"].get<std::string>()) : axes.end();
+            if (found == axes.end())
+                throw AgentError(ErrorCode::InvalidRequest, "axis must be x, y or z");
+            axis = found->second;
+        }
+    }
+    std::lock_guard<std::mutex> lock(m_mutex);
+    require_active_project(params);
+    require_no_active_mutation("Cannot change objects while a mutating job is active");
+    if (method == "object_delete")
+        m_facade->delete_instances(targets);
+    else if (method == "object_mirror")
+        m_facade->mirror_instances(targets, axis);
+    else
+        m_facade->rename_object(params["object_id"].get<std::string>(),
+                                params["name"].get<std::string>());
+    ++m_revision;
+    return {{"project_id", *m_project_id}, {"revision", m_revision}};
 }
 
 nlohmann::json AgentController::get_printer(const nlohmann::json& params) const

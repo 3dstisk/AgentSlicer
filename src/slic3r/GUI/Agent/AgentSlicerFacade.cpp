@@ -12,6 +12,7 @@
 #include "SecureFile.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
 #include "slic3r/GUI/GUI_App.hpp"
+#include "slic3r/GUI/GUI_ObjectList.hpp"
 #include "slic3r/GUI/Jobs/Worker.hpp"
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/Plater.hpp"
@@ -1108,6 +1109,84 @@ public:
         ScopedGeometryOnlyPlateUpdate plate_update;
         m_plater.changed_object(found_object_index);
         refresh_plate_membership(static_cast<size_t>(found_object_index));
+    }
+
+    void delete_instances(const std::vector<InstanceTarget>& targets) override
+    {
+        assert_gui_thread();
+        std::map<std::size_t, std::set<std::size_t>> grouped;
+        for (const InstanceTarget& target : targets) {
+            const auto [object_index, instance_index] = locate_instance(target);
+            grouped[object_index].insert(instance_index);
+        }
+        const Model& model = m_plater.model();
+        std::vector<ItemForDelete> items;
+        for (const auto& [object_index, instances] : grouped) {
+            const ModelObject& object = *model.objects[object_index];
+            // Orca asks before breaking a cut correspondence; agents cannot answer.
+            if (object.is_cut())
+                throw AgentError(ErrorCode::InvalidRequest,
+                                 "Objects that are part of a cut are deleted in Orca's desktop interface",
+                                 {{"object_id", object_id(object)}});
+            if (instances.size() == object.instances.size())
+                items.emplace_back(itObject, int(object_index), 0);
+            else
+                for (const std::size_t instance_index : instances)
+                    items.emplace_back(itInstance, int(object_index), int(instance_index));
+        }
+        ScopedGeometryOnlyPlateUpdate plate_update;
+        // Orca's object list deletes in reverse order and keeps plates in sync.
+        wxGetApp().obj_list()->delete_from_model_and_list(items);
+        refresh_all_plate_membership();
+    }
+
+    void mirror_instances(const std::vector<InstanceTarget>& targets, int axis) override
+    {
+        assert_gui_thread();
+        if (axis < 0 || axis > 2)
+            throw AgentError(ErrorCode::InvalidRequest, "axis must be x, y or z");
+        std::vector<std::pair<std::size_t, std::size_t>> located;
+        for (const InstanceTarget& target : targets)
+            located.push_back(locate_instance(target));
+        m_plater.take_snapshot("Mirror");
+        Model& model = m_plater.model();
+        std::set<std::size_t> changed;
+        for (const auto& [object_index, instance_index] : located) {
+            ModelObject& object = *model.objects[object_index];
+            ModelInstance& instance = *object.instances[instance_index];
+            const Vec3d center = object.instance_bounding_box(instance).center();
+            Matrix3d flip = Matrix3d::Identity();
+            flip(axis, axis) = -1.0;
+            Transform3d matrix = instance.get_matrix();
+            matrix.linear() = flip * matrix.linear();
+            matrix.translation() = flip * (matrix.translation() - center) + center;
+            instance.set_transformation(Geometry::Transformation(matrix));
+            object.invalidate_bounding_box();
+            // Keep the mirrored instance on the bed like Orca's mirror.
+            Vec3d offset = instance.get_offset();
+            offset.z() -= object.instance_bounding_box(instance).min.z();
+            instance.set_offset(offset);
+            object.invalidate_bounding_box();
+            changed.insert(object_index);
+        }
+        ScopedGeometryOnlyPlateUpdate plate_update;
+        for (const std::size_t object_index : changed) {
+            m_plater.changed_object(int(object_index));
+            refresh_plate_membership(object_index);
+        }
+    }
+
+    void rename_object(const std::string& id, const std::string& name) override
+    {
+        assert_gui_thread();
+        Model& model = m_plater.model();
+        const auto found = std::find_if(model.objects.begin(), model.objects.end(),
+                                        [&](const ModelObject* object) { return object_id(*object) == id; });
+        if (found == model.objects.end())
+            throw AgentError(ErrorCode::ObjectNotFound, "Object does not exist", {{"object_id", id}});
+        m_plater.take_snapshot("Rename Object");
+        (*found)->name = name;
+        wxGetApp().obj_list()->reload_all_plates();
     }
 
     int add_plate() override
@@ -2298,6 +2377,22 @@ public:
     }
 
 private:
+    std::pair<std::size_t, std::size_t> locate_instance(const InstanceTarget& target) const
+    {
+        const Model& model = m_plater.model();
+        for (std::size_t object_index = 0; object_index < model.objects.size(); ++object_index) {
+            const ModelObject& object = *model.objects[object_index];
+            if (object_id(object) != target.first)
+                continue;
+            for (std::size_t instance_index = 0; instance_index < object.instances.size(); ++instance_index)
+                if (instance_id(*object.instances[instance_index]) == target.second)
+                    return {object_index, instance_index};
+            break;
+        }
+        throw AgentError(ErrorCode::ObjectNotFound, "Object or instance does not exist",
+                         {{"object_id", target.first}, {"instance_id", target.second}});
+    }
+
     PartPlate& require_plate(std::size_t plate_index)
     {
         PartPlateList& plates = m_plater.get_partplate_list();

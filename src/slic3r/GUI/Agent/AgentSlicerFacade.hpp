@@ -5,6 +5,8 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -26,6 +28,9 @@ struct FacadeJobState
     nlohmann::json metadata = nullptr;
 };
 
+/** (object_id, instance_id) of one model instance. */
+using InstanceTarget = std::pair<std::string, std::string>;
+
 class AgentSlicerFacade
 {
 public:
@@ -41,6 +46,11 @@ public:
     virtual FacadeJobState model_import_state(bool allow_commit) = 0;
     virtual nlohmann::json scene() const = 0;
     virtual void transform_object(const nlohmann::json& transform) = 0;
+    /** Deletes instances like Orca's object list; all instances delete the object. */
+    virtual void delete_instances(const std::vector<InstanceTarget>& targets) = 0;
+    /** Mirrors instances along a world axis (0 = X) around their own centers. */
+    virtual void mirror_instances(const std::vector<InstanceTarget>& targets, int axis) = 0;
+    virtual void rename_object(const std::string& object_id, const std::string& name) = 0;
     virtual void start_auto_orient(const nlohmann::json& request) = 0;
     virtual FacadeJobState auto_orient_state() const = 0;
     /** Arranges every plate, or only `plate_index` like Orca's plate icon. */

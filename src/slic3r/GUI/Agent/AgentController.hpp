@@ -109,6 +109,8 @@ private:
     /** plate_rename, plate_delete, plate_lock and plate_move_to_front. */
     nlohmann::json edit_plate(const std::string& method, const nlohmann::json& params);
     nlohmann::json get_printer(const nlohmann::json& params) const;
+    /** object_delete, object_mirror and object_rename. */
+    nlohmann::json edit_objects(const std::string& method, const nlohmann::json& params);
     nlohmann::json set_bed_type(const nlohmann::json& params);
     nlohmann::json render_scene(const nlohmann::json& params);
     nlohmann::json render_toolpaths(const nlohmann::json& params);

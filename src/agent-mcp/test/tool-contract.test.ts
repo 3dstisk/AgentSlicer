@@ -18,6 +18,9 @@ describe("MCP tool schemas", () => {
       "scene_get",
       "object_transform",
       "object_auto_orient",
+      "object_delete",
+      "object_mirror",
+      "object_rename",
       "scene_arrange",
       "plate_add",
       "plate_rename",
@@ -86,6 +89,18 @@ describe("MCP tool schemas", () => {
     expect(toolSchemas.bed_type_set.safeParse({ project_id: "project_1", bed_type: "Cool Plate" }).success).toBe(false);
     expect(toolSchemas.bed_type_set.safeParse({ ...base, bed_type: "" }).success).toBe(false);
     expect(toolSchemas.printer_get.safeParse({ project_id: "project_1" }).success).toBe(true);
+  });
+
+  it("validates object delete, mirror and rename", () => {
+    const base = { project_id: "project_1", expected_revision: 2 };
+    const target = { object_id: "object_1", instance_id: "instance_1" };
+    expect(toolSchemas.object_delete.safeParse({ ...base, targets: [target] }).success).toBe(true);
+    expect(toolSchemas.object_delete.safeParse({ ...base, targets: [target, target] }).success).toBe(false);
+    expect(toolSchemas.object_delete.safeParse({ ...base, targets: [] }).success).toBe(false);
+    expect(toolSchemas.object_mirror.safeParse({ ...base, targets: [target], axis: "z" }).success).toBe(true);
+    expect(toolSchemas.object_mirror.safeParse({ ...base, targets: [target], axis: "w" }).success).toBe(false);
+    expect(toolSchemas.object_rename.safeParse({ ...base, object_id: "object_1", name: "Držák" }).success).toBe(true);
+    expect(toolSchemas.object_rename.safeParse({ ...base, object_id: "object_1", name: "a\nb" }).success).toBe(false);
   });
 
   it("accepts only root-level supported upload filenames and strong checksums", () => {

@@ -47,6 +47,9 @@ The v1 tool list and order are fixed:
 | `scene_get` | Return objects, instances, transforms, bounds, plates, and current revision. Instance `rotation_deg` and positive `scale` use the canonical form R * S * Mx (Orca Euler order Rz * Ry * Rx); `mirrored` reports the X mirror Mx. |
 | `object_transform` | Apply an absolute or relative position/rotation/scale and optional `place_on_bed`. Rotation and scale keep an instance's mirroring; a skewed instance rejects rotation and scale changes. |
 | `object_auto_orient` | Start native auto-orient for exact object/instance targets, or all printable unlocked instances when targets are omitted. |
+| `object_delete` | Delete object instances like Orca's object list; deleting every instance of an object deletes the object. Objects that are part of a cut are refused. |
+| `object_mirror` | Mirror instances along world `x`, `y` or `z` around each instance's center and keep them on the bed. |
+| `object_rename` | Rename an object (1 to 255 bytes, no control characters). |
 | `scene_arrange` | Start native arrangement of every plate, or only an optional zero-based `plate_index`, and return a job. Locked plates are skipped. |
 | `plate_add` | Add an empty plate like Orca's Add Plate toolbar action; return the new `revision` and zero-based `plate_index`. Fails when the maximum plate count is in use. |
 | `plate_rename` | Rename a zero-based `plate_index` (up to 250 characters; empty shows as Untitled). |
