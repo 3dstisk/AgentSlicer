@@ -35,7 +35,9 @@ public:
     virtual void restore_project(const std::filesystem::path& path) = 0;
     virtual void start_scene_export(const std::filesystem::path& path) = 0;
     virtual FacadeJobState scene_export_state() = 0;
-    virtual void start_model_import(const std::filesystem::path& path) = 0;
+    /** `display_name` replaces the snapshot's file name in imported object and volume names. */
+    virtual void start_model_import(const std::filesystem::path& path,
+                                    const std::string& display_name) = 0;
     virtual FacadeJobState model_import_state(bool allow_commit) = 0;
     virtual nlohmann::json scene() const = 0;
     virtual void transform_object(const nlohmann::json& transform) = 0;

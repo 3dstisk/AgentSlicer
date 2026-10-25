@@ -887,7 +887,8 @@ public:
         return m_geometry_future.get();
     }
 
-    void start_model_import(const std::filesystem::path& path) override
+    void start_model_import(const std::filesystem::path& path,
+                            const std::string& display_name) override
     {
         assert_gui_thread();
         if (m_import_active)
@@ -899,7 +900,7 @@ public:
         const std::shared_ptr<ImportTask> task = m_import_task;
         const std::string worker_path = path.string();
         try {
-            std::thread([task, worker_path,
+            std::thread([task, worker_path, display_name,
                          worker_lease = std::move(worker_lease)] {
                 std::unique_ptr<Model> model;
                 std::exception_ptr error;
@@ -911,6 +912,13 @@ public:
                         LoadStrategy::AddDefaultInstances | LoadStrategy::LoadModel |
                             LoadStrategy::Silence));
                     validate_import_complexity(*model);
+                    const std::string snapshot_name =
+                        std::filesystem::path(worker_path).filename().string();
+                    for (ModelObject* object : model->objects) {
+                        object->name = restore_import_name(object->name, snapshot_name, display_name);
+                        for (ModelVolume* volume : object->volumes)
+                            volume->name = restore_import_name(volume->name, snapshot_name, display_name);
+                    }
                 } catch (...) {
                     error = std::current_exception();
                 }

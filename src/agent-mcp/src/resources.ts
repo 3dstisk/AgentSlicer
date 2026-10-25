@@ -19,7 +19,7 @@ uploaded before calling \`model_import\`.
 4. Send one authenticated HTTP \`PUT\` containing the raw file bytes. Use the same bearer
    token as MCP, \`Content-Type: application/octet-stream\`, and the exact returned
    \`Content-Length\`.
-5. Call \`model_import\` with the returned \`workspace_path\` after the PUT succeeds.
+5. Call \`model_import\` with the returned \`workspace_path\` as \`path\` and the original filename as \`name\` after the PUT succeeds.
 
 Upload tickets are single-use and expire after ${uploads.ttlMs} milliseconds. A failed PUT
 requires a new \`upload_prepare\` call. The maximum upload size is ${uploads.maxBytes} bytes.

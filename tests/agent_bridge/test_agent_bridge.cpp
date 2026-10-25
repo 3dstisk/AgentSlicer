@@ -67,9 +67,11 @@ public:
         write_exclusive_file(path, "ASGEOM01", 8);
     }
     FacadeJobState scene_export_state() override { return {true, false, 1.0, {}, nullptr}; }
-    void start_model_import(const std::filesystem::path& path) override
+    void start_model_import(const std::filesystem::path& path,
+                            const std::string& display_name) override
     {
         imported_path = path;
+        imported_name = display_name;
         std::ifstream input(path, std::ios::binary);
         imported_contents.assign(std::istreambuf_iterator<char>(input),
                                  std::istreambuf_iterator<char>());
@@ -334,6 +336,7 @@ public:
     std::function<void()> on_arrange_start;
     std::string arrange_owned_fingerprint;
     std::filesystem::path imported_path;
+    std::string imported_name;
     std::string imported_contents;
     std::function<void(const std::filesystem::path&)> on_import;
     bool fail_import {false};
@@ -655,6 +658,7 @@ TEST_CASE("Import paths stay beneath workspace and revision commits after native
                                     {"path", "part.stl"}}});
     REQUIRE(facade->imported_path.parent_path() == workspace.root / "imports");
     REQUIRE(facade->imported_path.extension() == ".stl");
+    REQUIRE(facade->imported_name == "part.stl");
     REQUIRE(facade->imported_contents == "solid empty\nendsolid empty\n");
     REQUIRE(std::filesystem::exists(facade->imported_path));
     const auto completed =
@@ -674,6 +678,35 @@ TEST_CASE("Import paths stay beneath workspace and revision commits after native
         controller.handle({"format", "model_import",
                            {{"project_id", project["project_id"]}, {"expected_revision", 2},
                             {"path", "not-model.txt"}}}),
+        AgentError);
+}
+
+TEST_CASE("Imports keep the client's file name", "[AgentBridge]")
+{
+    REQUIRE(restore_import_name("import-ab12.stl", "import-ab12.stl", "drzak.stl") == "drzak.stl");
+    REQUIRE(restore_import_name("import-ab12", "import-ab12.stl", "drzak.stl") == "drzak");
+    REQUIRE(restore_import_name("Body", "import-ab12.3mf", "drzak.3mf") == "Body");
+    REQUIRE(is_import_display_name("Držák v2.stl"));
+    REQUIRE_FALSE(is_import_display_name("../drzak.stl"));
+    REQUIRE_FALSE(is_import_display_name("a\\b.stl"));
+    REQUIRE_FALSE(is_import_display_name(""));
+
+    TestWorkspace workspace;
+    auto facade = std::make_shared<FakeFacade>();
+    AgentController controller(facade, workspace.root, workspace.root / "shots",
+                               512u * 1024u * 1024u, workspace.root / "outputs",
+                               workspace.root / "imports");
+    const auto project = controller.handle({"create", "project_create", {}});
+    controller.handle({"import", "model_import",
+                       {{"project_id", project["project_id"]},
+                        {"expected_revision", project["revision"]},
+                        {"path", "part.stl"}, {"name", "Držák v2.stl"}}});
+    REQUIRE(facade->imported_name == "Držák v2.stl");
+    REQUIRE_THROWS_AS(
+        controller.handle({"nested", "model_import",
+                           {{"project_id", project["project_id"]},
+                            {"expected_revision", project["revision"]},
+                            {"path", "part.stl"}, {"name", "dir/part.stl"}}}),
         AgentError);
 }
 

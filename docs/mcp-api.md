@@ -43,7 +43,7 @@ The v1 tool list and order are fixed:
 | `slicer_status` | Return readiness, native protocol version, active project/revision, job count, and capabilities. |
 | `upload_prepare` | Create a single-use upload ticket for a named `.stl`, `.obj`, `.3mf`, `.step`, or `.stp` with an exact byte count and SHA-256. |
 | `project_create` | Reset Orca to one empty active project; return `project_id` and new `revision`. |
-| `model_import` | Start import of an `.stl`, `.obj`, `.3mf`, `.step`, or `.stp` from an absolute `/workspace/...` path and return a job. |
+| `model_import` | Start import of an `.stl`, `.obj`, `.3mf`, `.step`, or `.stp` from an absolute `/workspace/...` path and return a job. Optional `name` (the original file name, e.g. the `upload_prepare` filename) names the imported objects; it defaults to the path's file name. |
 | `scene_get` | Return objects, instances, transforms, bounds, plates, and current revision. Instance `rotation_deg` and positive `scale` use the canonical form R * S * Mx (Orca Euler order Rz * Ry * Rx); `mirrored` reports the X mirror Mx. |
 | `object_transform` | Apply an absolute or relative position/rotation/scale and optional `place_on_bed`. Rotation and scale keep an instance's mirroring; a skewed instance rejects rotation and scale changes. |
 | `object_auto_orient` | Start native auto-orient for exact object/instance targets, or all printable unlocked instances when targets are omitted. |

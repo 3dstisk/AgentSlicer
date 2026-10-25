@@ -22,6 +22,45 @@ inline constexpr std::uint64_t Max3mfEntryBytes = 512u * 1024u * 1024u;
 inline constexpr std::uint64_t Max3mfTotalBytes = 1024u * 1024u * 1024u;
 inline constexpr std::uint64_t Max3mfCompressionRatio = 200;
 inline constexpr std::size_t Max3mfEntryPathBytes = 512;
+inline constexpr std::size_t MaxImportDisplayNameBytes = 255;
+
+/** A client-supplied model file name: one path component, no control characters. */
+inline bool is_import_display_name(std::string_view name)
+{
+    if (name.empty() || name.size() > MaxImportDisplayNameBytes || name == "." || name == "..")
+        return false;
+    for (const char character : name)
+        if (static_cast<unsigned char>(character) < 0x20 || character == 0x7f ||
+            character == '/' || character == '\\')
+            return false;
+    return true;
+}
+
+/**
+ * Orca names imported objects and volumes after the file it loads. The agent
+ * loads a private snapshot (`import-<token>.ext`), so map the snapshot's file
+ * name, or else its stem, back to the client's file name.
+ */
+inline std::string restore_import_name(const std::string& value,
+                                       const std::string& snapshot_filename,
+                                       const std::string& display_filename)
+{
+    const auto stem = [](const std::string& filename) {
+        const std::size_t dot = filename.rfind('.');
+        return dot == std::string::npos || dot == 0 ? filename : filename.substr(0, dot);
+    };
+    const auto replace = [](std::string text, const std::string& from, const std::string& to) {
+        if (from.empty())
+            return text;
+        for (std::size_t position = text.find(from); position != std::string::npos;
+             position = text.find(from, position + to.size()))
+            text.replace(position, from.size(), to);
+        return text;
+    };
+    const std::string renamed = replace(value, snapshot_filename, display_filename);
+    return renamed != value ? renamed :
+                              replace(value, stem(snapshot_filename), stem(display_filename));
+}
 
 struct ImportArchiveBudget
 {

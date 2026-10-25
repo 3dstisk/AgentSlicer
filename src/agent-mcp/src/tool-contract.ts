@@ -277,6 +277,21 @@ export const toolSchemas = {
         .string()
         .startsWith("/workspace/")
         .describe("Absolute model path beneath /workspace"),
+      name: z
+        .string()
+        .min(1)
+        .refine(
+          (name) =>
+            Buffer.byteLength(name, "utf8") <= 255 &&
+            name !== "." &&
+            name !== ".." &&
+            !/[\u0000-\u001f\u007f/\\]/.test(name),
+          "name must be a file name without directories",
+        )
+        .optional()
+        .describe(
+          "Original file name used to name the imported objects, e.g. the upload_prepare filename. Defaults to the path's file name.",
+        ),
     })
     .strict(),
   scene_get: z.object(project).strict(),
@@ -558,7 +573,7 @@ const descriptions: Record<ToolName, string> = {
   scene_export: "Export a revision-bound native scene manifest and binary mesh buffers.",
   slicer_status: "Report native Orca bridge readiness, active project, revision, jobs, and capabilities.",
   upload_prepare:
-    "Create a single-use authenticated HTTP upload ticket for a local STL, OBJ, 3MF, STEP, or STP file. PUT the raw bytes to the returned same-origin upload_path, then pass workspace_path to model_import. Detailed guidance is available at agentslicer://docs/upload.",
+    "Create a single-use authenticated HTTP upload ticket for a local STL, OBJ, 3MF, STEP, or STP file. PUT the raw bytes to the returned same-origin upload_path, then pass workspace_path to model_import with the same filename as name. Detailed guidance is available at agentslicer://docs/upload.",
   project_create: "Reset Orca to a new empty project and return its opaque project id and revision.",
   model_import:
     "Import an STL, OBJ, 3MF, STEP, or STP model already present beneath /workspace. For local client files, call upload_prepare and complete its HTTP PUT first; see agentslicer://docs/upload.",

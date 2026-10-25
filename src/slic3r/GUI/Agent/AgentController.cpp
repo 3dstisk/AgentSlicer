@@ -1,4 +1,5 @@
 #include "AgentController.hpp"
+#include "AgentImportLimits.hpp"
 #include "AgentSettingValidation.hpp"
 #include "SecureFile.hpp"
 
@@ -277,6 +278,10 @@ PreparedRequest AgentController::prepare(
     }
     if (!request.params.contains("path") || !request.params.at("path").is_string())
         throw AgentError(ErrorCode::InvalidRequest, "path must be a string");
+    if (request.params.contains("name") &&
+        (!request.params.at("name").is_string() ||
+         !is_import_display_name(request.params.at("name").get_ref<const std::string&>())))
+        throw AgentError(ErrorCode::InvalidRequest, "name must be a file name without directories");
     prepared.import_snapshot = std::make_shared<TemporaryFile>(
         snapshot_workspace_import(
             m_workspace_root, m_import_staging_root,
@@ -770,7 +775,11 @@ nlohmann::json AgentController::import_model(const nlohmann::json& params,
     job.request_abandoned = std::move(request_abandoned);
     m_jobs.emplace(id, std::move(job));
     try {
-        m_facade->start_model_import(m_jobs.at(id).import_snapshot->path());
+        // Keep the client's file name; the snapshot name is a private token.
+        const std::string display_name = params.contains("name") ?
+            params.at("name").get<std::string>() :
+            std::filesystem::path(params.value("path", std::string())).filename().string();
+        m_facade->start_model_import(m_jobs.at(id).import_snapshot->path(), display_name);
     } catch (const std::exception& error) {
         Job& failed = m_jobs.at(id);
         failed.state = JobState::Failed;

@@ -69,6 +69,15 @@ describe("MCP tool schemas", () => {
     expect(toolSchemas.scene_arrange.safeParse({ project_id: "project_1", expected_revision: 2 }).success).toBe(true);
   });
 
+  it("accepts an optional original file name for model imports", () => {
+    const base = { project_id: "project_1", expected_revision: 2, path: "/workspace/uploads/a.stl" };
+    expect(toolSchemas.model_import.safeParse(base).success).toBe(true);
+    expect(toolSchemas.model_import.safeParse({ ...base, name: "Držák v2.stl" }).success).toBe(true);
+    expect(toolSchemas.model_import.safeParse({ ...base, name: "dir/a.stl" }).success).toBe(false);
+    expect(toolSchemas.model_import.safeParse({ ...base, name: "a\\b.stl" }).success).toBe(false);
+    expect(toolSchemas.model_import.safeParse({ ...base, name: "" }).success).toBe(false);
+  });
+
   it("accepts only root-level supported upload filenames and strong checksums", () => {
     expect(toolSchemas.upload_prepare.safeParse({
       filename: "part.STL",
