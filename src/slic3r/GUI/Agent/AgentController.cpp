@@ -238,6 +238,21 @@ std::vector<InstanceTarget> require_instance_targets(const nlohmann::json& param
 }
 
 /** A solid color in Orca's #RRGGBB form. */
+std::vector<std::string> require_object_ids(const nlohmann::json& params)
+{
+    if (!params.contains("object_ids") || !params["object_ids"].is_array() ||
+        params["object_ids"].empty())
+        throw AgentError(ErrorCode::InvalidRequest, "object_ids must list at least one object");
+    std::vector<std::string> ids;
+    std::set<std::string> seen;
+    for (const auto& id : params["object_ids"]) {
+        if (!id.is_string() || !seen.insert(id.get<std::string>()).second)
+            throw AgentError(ErrorCode::InvalidRequest, "object_ids must be unique object ids");
+        ids.push_back(id.get<std::string>());
+    }
+    return ids;
+}
+
 bool is_hex_color(const std::string& color)
 {
     return color.size() == 7 && color[0] == '#' &&
@@ -389,6 +404,10 @@ nlohmann::json AgentController::handle_prepared(const PreparedRequest& prepared)
             return get_filaments(request.params);
         if (request.method == "process_get")
             return get_process(request.params);
+        if (request.method == "object_settings_get")
+            return get_object_settings(request.params);
+        if (request.method == "object_settings_apply")
+            return apply_object_settings(request.params);
         if (request.method == "filament_color_set")
             return set_filament_color(request.params);
         if (request.method == "scene_render")
@@ -738,7 +757,7 @@ nlohmann::json AgentController::status() const
                           "plate_move_to_front", "printer_get", "bed_type_set",
                           "object_delete", "object_mirror", "object_rename",
                           "filaments_get", "filament_color_set", "object_filament_set",
-                          "process_get",
+                          "process_get", "object_settings_get", "object_settings_apply",
                           "scene_render",
                           "toolpath_render",
                           "desktop_capture", "preset_control", "settings_control",
@@ -1052,6 +1071,49 @@ nlohmann::json AgentController::get_process(const nlohmann::json& params) const
     result["project_id"] = *m_project_id;
     result["revision"] = m_revision;
     return result;
+}
+
+nlohmann::json AgentController::get_object_settings(const nlohmann::json& params) const
+{
+    const std::vector<std::string> object_ids = require_object_ids(params);
+    std::lock_guard<std::mutex> lock(m_mutex);
+    require_active_project(params);
+    nlohmann::json result = m_facade->object_settings(object_ids);
+    result["project_id"] = *m_project_id;
+    result["revision"] = m_revision;
+    return result;
+}
+
+nlohmann::json AgentController::apply_object_settings(const nlohmann::json& params)
+{
+    if (!params.contains("expected_revision"))
+        throw AgentError(ErrorCode::InvalidRequest, "expected_revision is required");
+    const std::vector<std::string> object_ids = require_object_ids(params);
+    const nlohmann::json changes = params.value("changes", nlohmann::json::array());
+    std::vector<std::string> reset_keys;
+    if (!changes.is_array())
+        throw AgentError(ErrorCode::InvalidRequest, "changes must be an array");
+    for (const auto& change : changes)
+        if (!change.is_object() || !change.contains("key") || !change["key"].is_string() ||
+            !change.contains("value"))
+            throw AgentError(ErrorCode::InvalidRequest, "Each change needs a key and a value");
+    if (params.contains("reset_keys")) {
+        if (!params["reset_keys"].is_array())
+            throw AgentError(ErrorCode::InvalidRequest, "reset_keys must be an array");
+        for (const auto& key : params["reset_keys"]) {
+            if (!key.is_string())
+                throw AgentError(ErrorCode::InvalidRequest, "reset_keys must contain setting keys");
+            reset_keys.push_back(key.get<std::string>());
+        }
+    }
+    if (changes.empty() && reset_keys.empty())
+        throw AgentError(ErrorCode::InvalidRequest, "Provide changes or reset_keys");
+    std::lock_guard<std::mutex> lock(m_mutex);
+    require_active_project(params);
+    require_no_active_mutation("Cannot change object settings while a mutating job is active");
+    m_facade->apply_object_settings(object_ids, changes, reset_keys);
+    ++m_revision;
+    return {{"project_id", *m_project_id}, {"revision", m_revision}};
 }
 
 nlohmann::json AgentController::set_filament_color(const nlohmann::json& params)

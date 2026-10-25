@@ -87,6 +87,14 @@ public:
     virtual nlohmann::json filament_state() const = 0;
     // Orca's Process tab in Simple mode: presets, pages, groups and options.
     virtual nlohmann::json process_state() const = 0;
+    // Orca's object settings tab for the given objects: effective values with
+    // their overrides, Simple mode.
+    virtual nlohmann::json object_settings(const std::vector<std::string>& object_ids) const = 0;
+    // Sets per-object overrides (typed like settings_apply) and removes
+    // reset_keys overrides on every given object.
+    virtual void apply_object_settings(const std::vector<std::string>& object_ids,
+                                       const nlohmann::json& changes,
+                                       const std::vector<std::string>& reset_keys) = 0;
     /** Sets one slot's solid color (#RRGGBB) like Orca's filament color picker. */
     virtual void set_filament_color(std::size_t index, const std::string& color) = 0;
     virtual nlohmann::json settings_describe(const nlohmann::json& request) const = 0;

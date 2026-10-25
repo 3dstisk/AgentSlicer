@@ -36,6 +36,7 @@ const MUTATIONS = new Set([
   "filament_color_set",
   "presets_select",
   "settings_apply",
+  "object_settings_apply",
 ]);
 const ALLOWED_COMMANDS = new Set([
   ...MUTATIONS,
@@ -43,6 +44,7 @@ const ALLOWED_COMMANDS = new Set([
   "printer_get",
   "filaments_get",
   "process_get",
+  "object_settings_get",
   "presets_list",
   "settings_get",
   "settings_describe",

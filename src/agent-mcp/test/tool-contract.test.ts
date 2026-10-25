@@ -33,6 +33,8 @@ describe("MCP tool schemas", () => {
       "filaments_get",
       "filament_color_set",
       "process_get",
+      "object_settings_get",
+      "object_settings_apply",
       "scene_render",
       "toolpath_render",
       "desktop_capture",
@@ -95,6 +97,17 @@ describe("MCP tool schemas", () => {
     expect(toolSchemas.filaments_get.safeParse({ project_id: "project_1" }).success).toBe(true);
     expect(toolSchemas.process_get.safeParse({ project_id: "project_1" }).success).toBe(true);
     expect(toolSchemas.process_get.safeParse({ project_id: "project_1", mode: "advanced" }).success).toBe(false);
+    const objects = { project_id: "project_1", object_ids: ["object_1", "object_2"] };
+    expect(toolSchemas.object_settings_get.safeParse(objects).success).toBe(true);
+    expect(toolSchemas.object_settings_get.safeParse({ ...objects, object_ids: [] }).success).toBe(false);
+    const apply = { ...objects, expected_revision: 3 };
+    expect(toolSchemas.object_settings_apply.safeParse({ ...apply, changes: [{ key: "wall_loops", value: 4 }] }).success).toBe(true);
+    expect(toolSchemas.object_settings_apply.safeParse({ ...apply, reset_keys: ["wall_loops"] }).success).toBe(true);
+    expect(toolSchemas.object_settings_apply.safeParse(apply).success).toBe(false);
+    expect(
+      toolSchemas.object_settings_apply.safeParse({ ...apply, changes: [{ key: "wall_loops", value: 4 }], reset_keys: ["wall_loops"] }).success,
+    ).toBe(false);
+    expect(toolSchemas.object_settings_apply.safeParse({ ...apply, reset_keys: ["printhost_password"] }).success).toBe(false);
   });
 
   it("requires a revision and a bed type key to set the bed type", () => {

@@ -47,6 +47,7 @@
 #include <boost/algorithm/string/case_conv.hpp>
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem/operations.hpp>
+#include <functional>
 #include <openssl/sha.h>
 #include <wx/thread.h>
 
@@ -697,6 +698,93 @@ std::string serialized_typed_value(const ConfigOptionDef& def, const nlohmann::j
         throw AgentError(ErrorCode::InvalidRequest, "Unsupported setting type",
                          {{"key", def.opt_key}, {"type", option_type_name(def.type)}});
     }
+}
+
+// Orca's settings tab pages in Simple mode, in tab order, with Orca's enable
+// and visibility rules evaluated on `values`. `modified` decides the orange
+// state (pages count hidden options too, like Orca); `describe` adds
+// caller-specific fields to each shown option.
+nlohmann::json settings_pages(const Tab& tab, const DynamicPrintConfig& values, bool is_global,
+                              const std::function<bool(const ConfigOptionDef&)>& modified,
+                              const std::function<void(const ConfigOptionDef&, nlohmann::json&)>& describe)
+{
+    std::map<std::string, bool> enabled;
+    std::map<std::string, bool> visible;
+    ConfigManipulation rules(
+        [] {},
+        [&enabled](const std::string& key, bool toggle, int opt_index) {
+            if (opt_index <= 0)
+                enabled[key] = toggle;
+        },
+        [&visible](const std::string& key, bool toggle, int opt_index) {
+            if (opt_index <= 0)
+                visible[key] = toggle;
+        },
+        [](const std::string&, const boost::any&) {});
+    rules.set_is_BBL_Printer(wxGetApp().preset_bundle->is_bbl_vendor());
+    DynamicPrintConfig config = values;
+    rules.toggle_print_fff_options(&config, 0, is_global);
+    const auto flag = [](const std::map<std::string, bool>& flags, const std::string& key) {
+        const auto found = flags.find(key);
+        return found == flags.end() || found->second;
+    };
+
+    nlohmann::json pages = nlohmann::json::array();
+    for (const PageShp& page : tab.pages()) {
+        if (!page)
+            continue;
+        nlohmann::json groups = nlohmann::json::array();
+        bool page_modified = false;
+        for (const ConfigOptionsGroupShp& group : page->m_optgroups) {
+            nlohmann::json options = nlohmann::json::array();
+            for (const Line& line : group->get_lines()) {
+                for (const Option& option : line.get_options()) {
+                    const ConfigOptionDef& def = option.opt;
+                    const std::string& key = def.opt_key;
+                    const ConfigOption* value = values.option(key);
+                    if (value == nullptr)
+                        continue;
+                    const bool changed = modified(def);
+                    page_modified = page_modified || changed;
+                    if (def.mode > comSimple || !flag(visible, key) ||
+                        !is_agent_setting_allowed(key) ||
+                        std::string(option_type_name(def.type)) == "unsupported")
+                        continue;
+                    nlohmann::json choices = nullptr;
+                    if (!def.enum_values.empty()) {
+                        choices = nlohmann::json::array();
+                        for (std::size_t index = 0; index < def.enum_values.size(); ++index)
+                            choices.push_back(
+                                {{"value", def.enum_values[index]},
+                                 {"label", index < def.enum_labels.size() ?
+                                               def.enum_labels[index] : def.enum_values[index]},
+                                 {"icon", param_icon("param_" + def.enum_values[index])}});
+                    }
+                    nlohmann::json entry {
+                        {"key", key}, {"label", def.label}, {"tooltip", def.tooltip},
+                        {"type", option_type_name(def.type)}, {"control", option_control(def)},
+                        {"unit", def.sidetext.empty() ? nlohmann::json(nullptr) :
+                                                        nlohmann::json(def.sidetext)},
+                        {"min", def.min <= -FLT_MAX ? nlohmann::json(nullptr) : nlohmann::json(def.min)},
+                        {"max", def.max >= FLT_MAX ? nlohmann::json(nullptr) : nlohmann::json(def.max)},
+                        {"choices", std::move(choices)},
+                        {"value", option_value(*value, def)},
+                        {"modified", changed}, {"enabled", flag(enabled, key)}
+                    };
+                    describe(def, entry);
+                    options.push_back(std::move(entry));
+                }
+            }
+            if (!options.empty())
+                groups.push_back({{"title", std::string(group->title.ToUTF8())},
+                                  {"icon", param_icon(std::string(group->icon.ToUTF8()))},
+                                  {"options", std::move(options)}});
+        }
+        if (!groups.empty())
+            pages.push_back({{"title", std::string(page->title().ToUTF8())},
+                             {"modified", page_modified}, {"groups", std::move(groups)}});
+    }
+    return pages;
 }
 
 void apply_setting(DynamicPrintConfig& config, const nlohmann::json& change)
@@ -1834,99 +1922,59 @@ public:
         };
     }
 
+    static const Tab& settings_tab(Preset::Type type)
+    {
+        const Tab* tab = wxGetApp().get_tab(type);
+        if (tab == nullptr)
+            throw AgentError(ErrorCode::InternalError, "Orca's settings tab is not available");
+        return *tab;
+    }
+
+    static TabPrintModel& object_tab()
+    {
+        auto* tab = dynamic_cast<TabPrintModel*>(wxGetApp().get_model_tab(false));
+        if (tab == nullptr)
+            throw AgentError(ErrorCode::InternalError, "Orca's object settings tab is not available");
+        return *tab;
+    }
+
+    std::vector<ModelObject*> find_objects(const std::vector<std::string>& object_ids) const
+    {
+        std::vector<ModelObject*> objects;
+        for (const std::string& id : object_ids) {
+            const auto found = std::find_if(m_plater.model().objects.begin(), m_plater.model().objects.end(),
+                                            [&](const ModelObject* object) { return object_id(*object) == id; });
+            if (found == m_plater.model().objects.end())
+                throw AgentError(ErrorCode::ObjectNotFound, "Object does not exist", {{"object_id", id}});
+            objects.push_back(*found);
+        }
+        if (objects.empty())
+            throw AgentError(ErrorCode::InvalidRequest, "At least one object is required");
+        return objects;
+    }
+
     nlohmann::json process_state() const override
     {
         assert_gui_thread();
         PresetBundle& bundle = *wxGetApp().preset_bundle;
         if (bundle.printers.get_edited_preset().printer_technology() != ptFFF)
             throw AgentError(ErrorCode::InvalidRequest, "Process settings require an FFF printer");
-        Tab* tab = wxGetApp().get_tab(Preset::TYPE_PRINT);
-        if (tab == nullptr)
-            throw AgentError(ErrorCode::InternalError, "Orca's process tab is not available");
+        const Tab& tab = settings_tab(Preset::TYPE_PRINT);
         const PresetCollection& prints = bundle.prints;
         const Preset& edited = prints.get_edited_preset();
         const Preset& saved = prints.get_selected_preset();
-
-        // Orca's own enable and visibility rules, run on a copy of the edited
-        // process like TabPrint::toggle_options (first nozzle variant).
-        std::map<std::string, bool> enabled;
-        std::map<std::string, bool> visible;
-        ConfigManipulation rules(
-            [] {},
-            [&enabled](const std::string& key, bool toggle, int opt_index) {
-                if (opt_index <= 0)
-                    enabled[key] = toggle;
+        nlohmann::json pages = settings_pages(
+            tab, edited.config, true,
+            [&](const ConfigOptionDef& def) {
+                const ConfigOption* value = edited.config.option(def.opt_key);
+                const ConfigOption* saved_value = saved.config.option(def.opt_key);
+                return value != nullptr && (saved_value == nullptr || !(*value == *saved_value));
             },
-            [&visible](const std::string& key, bool toggle, int opt_index) {
-                if (opt_index <= 0)
-                    visible[key] = toggle;
-            },
-            [](const std::string&, const boost::any&) {});
-        rules.set_is_BBL_Printer(bundle.is_bbl_vendor());
-        DynamicPrintConfig config = edited.config;
-        rules.toggle_print_fff_options(&config, 0, true);
-        const auto flag = [](const std::map<std::string, bool>& flags, const std::string& key) {
-            const auto found = flags.find(key);
-            return found == flags.end() || found->second;
-        };
-
-        nlohmann::json pages = nlohmann::json::array();
-        for (const PageShp& page : tab->pages()) {
-            if (!page)
-                continue;
-            nlohmann::json groups = nlohmann::json::array();
-            bool page_modified = false;
-            for (const ConfigOptionsGroupShp& group : page->m_optgroups) {
-                nlohmann::json options = nlohmann::json::array();
-                for (const Line& line : group->get_lines()) {
-                    for (const Option& option : line.get_options()) {
-                        const ConfigOptionDef& def = option.opt;
-                        const std::string& key = def.opt_key;
-                        const ConfigOption* value = edited.config.option(key);
-                        if (value == nullptr)
-                            continue;
-                        const ConfigOption* saved_value = saved.config.option(key);
-                        const bool modified = saved_value == nullptr || !(*value == *saved_value);
-                        // Like Orca, a page is modified by any of its options, shown or not.
-                        page_modified = page_modified || modified;
-                        if (def.mode > comSimple || !flag(visible, key) ||
-                            !is_agent_setting_allowed(key) ||
-                            std::string(option_type_name(def.type)) == "unsupported")
-                            continue;
-                        nlohmann::json choices = nullptr;
-                        if (!def.enum_values.empty()) {
-                            choices = nlohmann::json::array();
-                            for (std::size_t index = 0; index < def.enum_values.size(); ++index)
-                                choices.push_back(
-                                    {{"value", def.enum_values[index]},
-                                     {"label", index < def.enum_labels.size() ?
-                                                   def.enum_labels[index] : def.enum_values[index]},
-                                     {"icon", param_icon("param_" + def.enum_values[index])}});
-                        }
-                        options.push_back({
-                            {"key", key}, {"label", def.label}, {"tooltip", def.tooltip},
-                            {"type", option_type_name(def.type)}, {"control", option_control(def)},
-                            {"unit", def.sidetext.empty() ? nlohmann::json(nullptr) :
-                                                            nlohmann::json(def.sidetext)},
-                            {"min", def.min <= -FLT_MAX ? nlohmann::json(nullptr) : nlohmann::json(def.min)},
-                            {"max", def.max >= FLT_MAX ? nlohmann::json(nullptr) : nlohmann::json(def.max)},
-                            {"choices", std::move(choices)},
-                            {"value", option_value(*value, def)},
-                            {"saved_value", saved_value != nullptr ?
-                                                option_value(*saved_value, def) : nlohmann::json(nullptr)},
-                            {"modified", modified}, {"enabled", flag(enabled, key)}
-                        });
-                    }
-                }
-                if (!options.empty())
-                    groups.push_back({{"title", std::string(group->title.ToUTF8())},
-                                      {"icon", param_icon(std::string(group->icon.ToUTF8()))},
-                                      {"options", std::move(options)}});
-            }
-            if (!groups.empty())
-                pages.push_back({{"title", std::string(page->title().ToUTF8())},
-                                 {"modified", page_modified}, {"groups", std::move(groups)}});
-        }
+            [&](const ConfigOptionDef& def, nlohmann::json& entry) {
+                const ConfigOption* saved_value = saved.config.option(def.opt_key);
+                entry["saved_value"] = saved_value != nullptr ?
+                    option_value(*saved_value, def) : nlohmann::json(nullptr);
+            });
 
         nlohmann::json presets = nlohmann::json::array();
         for (const Preset& preset : prints.get_presets()) {
@@ -1940,6 +1988,94 @@ public:
                 {"presets", std::move(presets)},
                 {"pages", std::move(pages)},
                 {"dirty", presets_are_dirty(bundle)}};
+    }
+
+    nlohmann::json object_settings(const std::vector<std::string>& object_ids) const override
+    {
+        assert_gui_thread();
+        PresetBundle& bundle = *wxGetApp().preset_bundle;
+        if (bundle.printers.get_edited_preset().printer_technology() != ptFFF)
+            throw AgentError(ErrorCode::InvalidRequest, "Object settings require an FFF printer");
+        TabPrintModel& tab = object_tab();
+        const std::vector<ModelObject*> objects = find_objects(object_ids);
+        const DynamicPrintConfig& global = bundle.prints.get_edited_preset().config;
+        // Like Orca's object tab: the global process with the object's overrides.
+        const auto effective = [&](const ModelObject& object) {
+            DynamicPrintConfig values = global;
+            for (const std::string& key : object.config.keys())
+                if (tab.has_key(key))
+                    values.set_key_value(key, object.config.option(key)->clone());
+            return values;
+        };
+        const DynamicPrintConfig first = effective(*objects.front());
+        nlohmann::json pages = settings_pages(
+            tab, first, false,
+            [&](const ConfigOptionDef& def) {
+                const ConfigOption* base = global.option(def.opt_key);
+                return std::any_of(objects.begin(), objects.end(), [&](const ModelObject* object) {
+                    const ConfigOption* own = object->config.option(def.opt_key);
+                    return own != nullptr && (base == nullptr || !(*own == *base));
+                });
+            },
+            [&](const ConfigOptionDef& def, nlohmann::json& entry) {
+                const ConfigOption* shown = first.option(def.opt_key);
+                bool mixed = false;
+                for (std::size_t index = 1; index < objects.size() && !mixed; ++index) {
+                    const ConfigOption* own = objects[index]->config.option(def.opt_key);
+                    const ConfigOption* value = own != nullptr ? own : global.option(def.opt_key);
+                    mixed = value != nullptr && shown != nullptr && !(*value == *shown);
+                }
+                entry["mixed"] = mixed;
+            });
+        return {{"object_ids", object_ids}, {"pages", std::move(pages)}};
+    }
+
+    void apply_object_settings(const std::vector<std::string>& object_ids,
+                               const nlohmann::json& changes,
+                               const std::vector<std::string>& reset_keys) override
+    {
+        assert_gui_thread();
+        TabPrintModel& tab = object_tab();
+        const std::vector<ModelObject*> objects = find_objects(object_ids);
+        const DynamicPrintConfig& global = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+        const auto require_object_key = [&](const std::string& key) {
+            if (!tab.has_key(key) || !is_agent_setting_allowed(key))
+                throw AgentError(ErrorCode::InvalidRequest,
+                                 "Setting cannot be changed per object", {{"key", key}});
+        };
+        // Validate the whole batch before changing any object.
+        DynamicPrintConfig parsed = global;
+        for (const auto& change : changes) {
+            require_object_key(change.at("key").get<std::string>());
+            nlohmann::json scoped = change;
+            scoped["scope"] = "object";
+            apply_setting(parsed, scoped);
+        }
+        for (const std::string& key : reset_keys)
+            require_object_key(key);
+
+        m_plater.take_snapshot("Change Object Settings");
+        for (ModelObject* object : objects) {
+            for (const auto& change : changes) {
+                const std::string key = change.at("key").get<std::string>();
+                const ConfigOption* value = parsed.option(key);
+                const ConfigOption* base = global.option(key);
+                // An override equal to the global value has no effect; drop it
+                // so the object keeps following the process.
+                if (base != nullptr && *value == *base)
+                    object->config.erase(key);
+                else
+                    object->config.set_key_value(key, value->clone());
+            }
+            for (const std::string& key : reset_keys)
+                object->config.erase(key);
+            wxGetApp().obj_list()->object_config_options_changed({object, nullptr});
+        }
+        Model& model = m_plater.model();
+        for (ModelObject* object : objects) {
+            const auto found = std::find(model.objects.begin(), model.objects.end(), object);
+            m_plater.changed_object(int(found - model.objects.begin()));
+        }
     }
 
     nlohmann::json filament_state() const override

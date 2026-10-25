@@ -262,6 +262,11 @@ function artifactPath(extension: OutputExtension) {
     });
 }
 
+const objectIds = z
+  .array(opaqueId)
+  .min(1)
+  .max(256)
+  .refine((ids) => uniqueBy(ids, String), "Object ids must be unique");
 export const toolSchemas = {
   slicer_status: z.object({}).strict(),
   upload_prepare: z
@@ -384,6 +389,38 @@ export const toolSchemas = {
   printer_get: z.object(projectSnapshot).strict(),
   filaments_get: z.object(projectSnapshot).strict(),
   process_get: z.object(projectSnapshot).strict(),
+  object_settings_get: z
+    .object({ ...projectSnapshot, object_ids: objectIds.describe("Objects whose settings to read") })
+    .strict(),
+  object_settings_apply: z
+    .object({
+      ...projectWithRevision,
+      object_ids: objectIds.describe("Objects that receive every change and reset"),
+      changes: z
+        .array(
+          z
+            .object({
+              key: safeSettingKey.describe("Exact object-level setting key returned by object_settings_get"),
+              value: settingValue.describe("Typed JSON value like settings_apply"),
+            })
+            .strict(),
+        )
+        .max(256)
+        .refine((changes) => uniqueBy(changes, (change) => change.key), "Setting changes must be unique")
+        .default([]),
+      reset_keys: z
+        .array(safeSettingKey)
+        .max(256)
+        .refine((keys) => uniqueBy(keys, String), "Reset keys must be unique")
+        .default([])
+        .describe("Remove these overrides so the objects follow the process again"),
+    })
+    .strict()
+    .refine((request) => request.changes.length + request.reset_keys.length > 0, "Provide changes or reset_keys")
+    .refine(
+      (request) => !request.changes.some((change) => request.reset_keys.includes(change.key)),
+      "A key cannot be both changed and reset",
+    ),
   filament_color_set: z
     .object({
       ...projectWithRevision,
@@ -579,6 +616,8 @@ export const toolNames = [
   "filaments_get",
   "filament_color_set",
   "process_get",
+  "object_settings_get",
+  "object_settings_apply",
   "scene_render",
   "toolpath_render",
   "desktop_capture",
@@ -644,6 +683,10 @@ const descriptions: Record<ToolName, string> = {
   filaments_get:
     "Read Orca's sidebar filament section: each zero-based filament slot's preset and #RRGGBB color, the visible filament presets with vendor, type, system/user origin and printer compatibility, and whether presets have unsaved edits. Change slot presets with presets_select filaments (one name per slot).",
   filament_color_set: "Set one zero-based filament slot's solid #RRGGBB color like Orca's color picker.",
+  object_settings_get:
+    "Read Orca's object settings tab in Simple mode for one or more object_ids (scene_get): Frequent, then the object-level options of the process pages. Values are the process value with each object's override; modified marks options some object overrides with a different value, mixed marks options whose value differs between the objects. Other fields match process_get.",
+  object_settings_apply:
+    "Set per-object setting overrides on every given object, like Orca's Objects mode, and remove reset_keys overrides so the objects follow the process again. Values are typed like settings_apply. An override equal to the process value is removed. Overrides are saved in the project and used when slicing.",
   process_get:
     "Read Orca's sidebar Process tab in Simple mode: the selected process preset (and whether it has unsaved edits), compatible process presets, and pages of option groups in Orca's order. Each option has its label, type, control, unit, limits, choices with labels and icon paths, effective and saved values, and Orca's modified and enabled state. Change values with settings_apply in process scope; icon paths are served like printer_get images.",
   bed_type_set:
@@ -734,23 +777,42 @@ const filamentsResultSchema = z
     dirty: z.boolean(),
   })
   .strict();
-const processOptionSchema = z
+const settingsOptionFields = {
+  key: z.string(),
+  label: z.string(),
+  tooltip: z.string(),
+  type: z.string(),
+  control: z.enum(["checkbox", "filament", "select", "spin", "text"]),
+  unit: z.string().nullable(),
+  min: z.number().nullable(),
+  max: z.number().nullable(),
+  choices: z
+    .array(z.object({ value: z.string(), label: z.string(), icon: z.string().nullable() }).strict())
+    .nullable(),
+  value: settingValue,
+  modified: z.boolean(),
+  enabled: z.boolean(),
+};
+const settingsPagesSchema = <T extends z.ZodTypeAny>(option: T) =>
+  z.array(
+    z
+      .object({
+        title: z.string(),
+        modified: z.boolean(),
+        groups: z.array(
+          z.object({ title: z.string(), icon: z.string().nullable(), options: z.array(option) }).strict(),
+        ),
+      })
+      .strict(),
+  );
+const processOptionSchema = z.object({ ...settingsOptionFields, saved_value: settingValue }).strict();
+const objectOptionSchema = z.object({ ...settingsOptionFields, mixed: z.boolean() }).strict();
+const objectSettingsResultSchema = z
   .object({
-    key: z.string(),
-    label: z.string(),
-    tooltip: z.string(),
-    type: z.string(),
-    control: z.enum(["checkbox", "filament", "select", "spin", "text"]),
-    unit: z.string().nullable(),
-    min: z.number().nullable(),
-    max: z.number().nullable(),
-    choices: z
-      .array(z.object({ value: z.string(), label: z.string(), icon: z.string().nullable() }).strict())
-      .nullable(),
-    value: settingValue,
-    saved_value: settingValue,
-    modified: z.boolean(),
-    enabled: z.boolean(),
+    project_id: opaqueId,
+    revision,
+    object_ids: z.array(opaqueId),
+    pages: settingsPagesSchema(objectOptionSchema),
   })
   .strict();
 const processResultSchema = z
@@ -759,19 +821,7 @@ const processResultSchema = z
     revision,
     preset: z.object({ name: z.string(), system: z.boolean(), modified: z.boolean() }).strict(),
     presets: z.array(z.object({ name: z.string(), system: z.boolean() }).strict()),
-    pages: z.array(
-      z
-        .object({
-          title: z.string(),
-          modified: z.boolean(),
-          groups: z.array(
-            z
-              .object({ title: z.string(), icon: z.string().nullable(), options: z.array(processOptionSchema) })
-              .strict(),
-          ),
-        })
-        .strict(),
-    ),
+    pages: settingsPagesSchema(processOptionSchema),
     dirty: z.boolean(),
   })
   .strict();
@@ -1808,6 +1858,8 @@ export function createAgentCommands(dependencies: AgentToolDependencies) {
     printer_get: defineCommand(toolSchemas.printer_get, printerResultSchema, (params) => bridgeTool(dependencies, "printer_get", params, printerResultSchema)),
     filaments_get: defineCommand(toolSchemas.filaments_get, filamentsResultSchema, (params) => bridgeTool(dependencies, "filaments_get", params, filamentsResultSchema)),
     process_get: defineCommand(toolSchemas.process_get, processResultSchema, (params) => bridgeTool(dependencies, "process_get", params, processResultSchema)),
+    object_settings_get: defineCommand(toolSchemas.object_settings_get, objectSettingsResultSchema, (params) => bridgeTool(dependencies, "object_settings_get", params, objectSettingsResultSchema)),
+    object_settings_apply: defineCommand(toolSchemas.object_settings_apply, projectResultSchema, (params) => bridgeTool(dependencies, "object_settings_apply", params, projectResultSchema)),
     filament_color_set: defineCommand(toolSchemas.filament_color_set, projectResultSchema, (params) => bridgeTool(dependencies, "filament_color_set", params, projectResultSchema)),
     bed_type_set: defineCommand(toolSchemas.bed_type_set, bedTypeResultSchema, (params) => bridgeTool(dependencies, "bed_type_set", params, bedTypeResultSchema)),
     plate_move_to_front: defineCommand(toolSchemas.plate_move_to_front, plateResultSchema, (params) => bridgeTool(dependencies, "plate_move_to_front", params, plateResultSchema)),

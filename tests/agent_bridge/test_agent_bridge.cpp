@@ -175,6 +175,17 @@ public:
                 {"pages", nlohmann::json::array()},
                 {"dirty", false}};
     }
+    nlohmann::json object_settings(const std::vector<std::string>& object_ids) const override
+    {
+        return {{"object_ids", object_ids}, {"pages", nlohmann::json::array()}};
+    }
+    void apply_object_settings(const std::vector<std::string>& object_ids,
+                               const nlohmann::json& changes,
+                               const std::vector<std::string>& reset_keys) override
+    {
+        object_settings_calls.push_back(
+            {{"object_ids", object_ids}, {"changes", changes}, {"reset_keys", reset_keys}});
+    }
     void set_filament_color(std::size_t index, const std::string& color) override
     {
         if (index != 0)
@@ -429,6 +440,7 @@ public:
     std::optional<std::size_t> front_plate;
     std::vector<InstanceTarget> deleted;
     std::string filament_color = "#F2754E";
+    std::vector<nlohmann::json> object_settings_calls;
     std::vector<InstanceTarget> mirrored;
     int mirror_axis {-1};
     std::pair<std::string, std::string> renamed;
@@ -1388,6 +1400,44 @@ TEST_CASE("Process state reads without changing the revision", "[AgentBridge]")
     REQUIRE(process["preset"]["name"] == "0.20mm Standard");
     REQUIRE(process["project_id"] == project["project_id"]);
     REQUIRE(process["revision"] == project["revision"]);
+}
+
+TEST_CASE("Object settings read per object and overrides advance the revision", "[AgentBridge]")
+{
+    auto facade = std::make_shared<FakeFacade>();
+    AgentController controller(facade);
+    const auto project = controller.handle({"create", "project_create", {}});
+    const auto read = controller.handle(
+        {"read", "object_settings_get",
+         {{"project_id", project["project_id"]}, {"object_ids", {"object_1", "object_2"}}}});
+    REQUIRE(read["object_ids"] == nlohmann::json({"object_1", "object_2"}));
+    REQUIRE(read["revision"] == project["revision"]);
+    for (const nlohmann::json& ids : {nlohmann::json::array(), nlohmann::json({"object_1", "object_1"}),
+                                      nlohmann::json({3}), nlohmann::json("object_1")})
+        REQUIRE_THROWS_AS(controller.handle({"bad", "object_settings_get",
+                                             {{"project_id", project["project_id"]},
+                                              {"object_ids", ids}}}),
+                          AgentError);
+
+    const auto applied = controller.handle(
+        {"apply", "object_settings_apply",
+         {{"project_id", project["project_id"]}, {"expected_revision", project["revision"]},
+          {"object_ids", {"object_1"}},
+          {"changes", {{{"key", "wall_loops"}, {"value", 4}}}},
+          {"reset_keys", {"sparse_infill_density"}}}});
+    REQUIRE(applied["revision"] == project["revision"].get<int>() + 1);
+    REQUIRE(facade->object_settings_calls.size() == 1);
+    REQUIRE(facade->object_settings_calls[0]["reset_keys"] == nlohmann::json({"sparse_infill_density"}));
+    REQUIRE_THROWS_AS(controller.handle({"empty", "object_settings_apply",
+                                         {{"project_id", project["project_id"]},
+                                          {"expected_revision", applied["revision"]},
+                                          {"object_ids", {"object_1"}}}}),
+                      AgentError);
+    REQUIRE_THROWS_AS(controller.handle({"stale", "object_settings_apply",
+                                         {{"project_id", project["project_id"]},
+                                          {"object_ids", {"object_1"}},
+                                          {"reset_keys", {"wall_loops"}}}}),
+                      AgentError);
 }
 
 TEST_CASE("Filament slots read without a revision and color changes advance it", "[AgentBridge]")
