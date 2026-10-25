@@ -381,7 +381,7 @@ nlohmann::json AgentController::handle_prepared(const PreparedRequest& prepared)
         if (request.method == "printer_get")
             return get_printer(request.params);
         if (request.method == "object_delete" || request.method == "object_mirror" ||
-            request.method == "object_rename")
+            request.method == "object_rename" || request.method == "object_filament_set")
             return edit_objects(request.method, request.params);
         if (request.method == "bed_type_set")
             return set_bed_type(request.params);
@@ -735,7 +735,7 @@ nlohmann::json AgentController::status() const
                           "plate_arrange", "plate_rename", "plate_delete", "plate_lock",
                           "plate_move_to_front", "printer_get", "bed_type_set",
                           "object_delete", "object_mirror", "object_rename",
-                          "filaments_get", "filament_color_set",
+                          "filaments_get", "filament_color_set", "object_filament_set",
                           "scene_render",
                           "toolpath_render",
                           "desktop_capture", "preset_control", "settings_control",
@@ -973,7 +973,20 @@ nlohmann::json AgentController::edit_objects(const std::string& method,
         throw AgentError(ErrorCode::InvalidRequest, "expected_revision is required");
     std::vector<InstanceTarget> targets;
     int axis = -1;
-    if (method == "object_rename") {
+    std::optional<std::string> volume_id;
+    std::size_t filament = 0;
+    if (method == "object_filament_set") {
+        if (!params.contains("object_id") || !params["object_id"].is_string())
+            throw AgentError(ErrorCode::InvalidRequest, "object_id must be a string");
+        if (params.contains("volume_id")) {
+            if (!params["volume_id"].is_string())
+                throw AgentError(ErrorCode::InvalidRequest, "volume_id must be a string");
+            volume_id = params["volume_id"].get<std::string>();
+        }
+        filament = require_index(params, "filament");
+        if (filament < 1 || filament > 256)
+            throw AgentError(ErrorCode::InvalidRequest, "filament must be a slot number from 1");
+    } else if (method == "object_rename") {
         if (!params.contains("object_id") || !params["object_id"].is_string())
             throw AgentError(ErrorCode::InvalidRequest, "object_id must be a string");
         if (!params.contains("name") || !params["name"].is_string() ||
@@ -998,6 +1011,9 @@ nlohmann::json AgentController::edit_objects(const std::string& method,
         m_facade->delete_instances(targets);
     else if (method == "object_mirror")
         m_facade->mirror_instances(targets, axis);
+    else if (method == "object_filament_set")
+        m_facade->set_object_filament(params["object_id"].get<std::string>(), volume_id,
+                                      int(filament));
     else
         m_facade->rename_object(params["object_id"].get<std::string>(),
                                 params["name"].get<std::string>());

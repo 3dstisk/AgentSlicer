@@ -21,6 +21,7 @@ describe("MCP tool schemas", () => {
       "object_delete",
       "object_mirror",
       "object_rename",
+      "object_filament_set",
       "scene_arrange",
       "plate_add",
       "plate_rename",
@@ -99,6 +100,13 @@ describe("MCP tool schemas", () => {
     expect(toolSchemas.bed_type_set.safeParse({ project_id: "project_1", bed_type: "Cool Plate" }).success).toBe(false);
     expect(toolSchemas.bed_type_set.safeParse({ ...base, bed_type: "" }).success).toBe(false);
     expect(toolSchemas.printer_get.safeParse({ project_id: "project_1" }).success).toBe(true);
+  });
+
+  it("validates object filament assignments", () => {
+    const base = { project_id: "project_1", expected_revision: 2, object_id: "object_1" };
+    expect(toolSchemas.object_filament_set.safeParse({ ...base, filament: 2 }).success).toBe(true);
+    expect(toolSchemas.object_filament_set.safeParse({ ...base, volume_id: "volume_3", filament: 1 }).success).toBe(true);
+    expect(toolSchemas.object_filament_set.safeParse({ ...base, filament: 0 }).success).toBe(false);
   });
 
   it("validates object delete, mirror and rename", () => {

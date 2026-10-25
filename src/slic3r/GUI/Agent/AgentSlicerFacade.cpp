@@ -841,6 +841,9 @@ public:
                 entry["volumes"].push_back({
                     {"volume_id", id}, {"name", volume->name},
                     {"role", ModelVolume::type_to_string(volume->type())},
+                    // 0: the part follows its object's filament.
+                    {"filament", volume->config.has("extruder") ?
+                                     volume->config.opt_int("extruder") : 0},
                     {"mesh_id", id}, {"transform", matrix_json(volume->get_matrix())}
                 });
             }
@@ -1022,6 +1025,7 @@ public:
                 {"object_id", object_id(object)},
                 {"object_index", object_index},
                 {"name", object.name},
+                {"filament", object_filament(object)},
                 {"bounds", bounds_json(object.bounding_box_exact())},
                 {"instances", std::move(instances)}
             });
@@ -1174,6 +1178,49 @@ public:
             m_plater.changed_object(int(object_index));
             refresh_plate_membership(object_index);
         }
+    }
+
+    void set_object_filament(const std::string& id, const std::optional<std::string>& volume,
+                             int filament) override
+    {
+        assert_gui_thread();
+        const auto* colors =
+            wxGetApp().preset_bundle->project_config.option<ConfigOptionStrings>("filament_colour");
+        const int slots = colors != nullptr ? int(colors->values.size()) : 1;
+        if (filament < 1 || filament > slots)
+            throw AgentError(ErrorCode::InvalidRequest, "Filament slot does not exist",
+                             {{"filament", filament}, {"slots", slots}});
+        Model& model = m_plater.model();
+        const auto found = std::find_if(model.objects.begin(), model.objects.end(),
+                                        [&](const ModelObject* object) { return object_id(*object) == id; });
+        if (found == model.objects.end())
+            throw AgentError(ErrorCode::ObjectNotFound, "Object does not exist", {{"object_id", id}});
+        ModelObject& object = **found;
+        ModelVolume* target = nullptr;
+        if (volume) {
+            for (ModelVolume* candidate : object.volumes)
+                if ("volume_" + std::to_string(candidate->id().id) == *volume)
+                    target = candidate;
+            if (target == nullptr)
+                throw AgentError(ErrorCode::ObjectNotFound, "Part does not exist",
+                                 {{"volume_id", *volume}});
+            // Orca assigns filaments to model parts and modifiers only.
+            if (target->type() != ModelVolumeType::MODEL_PART &&
+                target->type() != ModelVolumeType::PARAMETER_MODIFIER)
+                throw AgentError(ErrorCode::InvalidRequest,
+                                 "Only model parts and modifiers take a filament",
+                                 {{"volume_id", *volume}});
+        }
+        // Same steps as Orca's ObjectList::set_extruder_for_selected_items.
+        m_plater.take_snapshot("Change Filaments");
+        ModelConfig& config = target != nullptr ? target->config : object.config;
+        config.set_key_value("extruder", new ConfigOptionInt(filament));
+        if (target == nullptr)
+            for (ModelVolume* part : object.volumes)
+                if (part->type() == ModelVolumeType::MODEL_PART && part->config.has("extruder"))
+                    part->config.erase("extruder");
+        m_plater.update();
+        wxGetApp().obj_list()->reload_all_plates();
     }
 
     void rename_object(const std::string& id, const std::string& name) override
@@ -1653,6 +1700,11 @@ public:
         }
 
         live = candidate;
+        // A printer with more nozzles grows the preset list only; size the
+        // per-slot color arrays to match, as Orca's set_num_filaments does.
+        const auto* colors = live.project_config.option<ConfigOptionStrings>("filament_colour");
+        if (fff && colors != nullptr && colors->values.size() < live.filament_presets.size())
+            live.set_num_filaments(unsigned(live.filament_presets.size()));
         wxGetApp().load_current_presets(false, false);
         const nlohmann::json selected = selected_presets(live);
         return {{"selected", selected}, {"changed", had_dirty || selected != before}};
@@ -2445,6 +2497,13 @@ public:
     }
 
 private:
+    /** Effective object filament; Orca treats 0 as the first slot. */
+    static int object_filament(const ModelObject& object)
+    {
+        const int value = object.config.has("extruder") ? object.config.opt_int("extruder") : 0;
+        return value > 0 ? value : 1;
+    }
+
     std::pair<std::size_t, std::size_t> locate_instance(const InstanceTarget& target) const
     {
         const Model& model = m_plater.model();

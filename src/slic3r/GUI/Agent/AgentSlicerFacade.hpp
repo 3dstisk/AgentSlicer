@@ -51,6 +51,13 @@ public:
     /** Mirrors instances along a world axis (0 = X) around their own centers. */
     virtual void mirror_instances(const std::vector<InstanceTarget>& targets, int axis) = 0;
     virtual void rename_object(const std::string& object_id, const std::string& name) = 0;
+    /**
+     * Assigns a 1-based filament slot to an object, or to one of its model
+     * parts or modifiers, like Orca's object list.
+     */
+    virtual void set_object_filament(const std::string& object_id,
+                                     const std::optional<std::string>& volume_id,
+                                     int filament) = 0;
     virtual void start_auto_orient(const nlohmann::json& request) = 0;
     virtual FacadeJobState auto_orient_state() const = 0;
     /** Arranges every plate, or only `plate_index` like Orca's plate icon. */

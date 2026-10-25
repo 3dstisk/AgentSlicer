@@ -49,6 +49,7 @@ The v1 tool list and order are fixed:
 | `object_auto_orient` | Start native auto-orient for exact object/instance targets, or all printable unlocked instances when targets are omitted. |
 | `object_delete` | Delete object instances like Orca's object list; deleting every instance of an object deletes the object. Objects that are part of a cut are refused. |
 | `object_mirror` | Mirror instances along world `x`, `y` or `z` around each instance's center and keep them on the bed. |
+| `object_filament_set` | Assign a 1-based filament slot to an object, or with `volume_id` to a model part or modifier. Setting the object clears its parts' own assignments. `scene_get` and geometry manifests report `filament` per object and per volume (`0` follows the object). |
 | `object_rename` | Rename an object (1 to 255 bytes, no control characters). |
 | `scene_arrange` | Start native arrangement of every plate, or only an optional zero-based `plate_index`, and return a job. Locked plates are skipped. |
 | `plate_add` | Add an empty plate like Orca's Add Plate toolbar action; return the new `revision` and zero-based `plate_index`. Fails when the maximum plate count is in use. |

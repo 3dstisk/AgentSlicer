@@ -30,6 +30,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #if defined(__linux__)
@@ -181,6 +182,13 @@ public:
     {
         mirrored = targets;
         mirror_axis = axis;
+    }
+    void set_object_filament(const std::string& id, const std::optional<std::string>& volume,
+                             int filament) override
+    {
+        if (filament > 2)
+            throw AgentError(ErrorCode::InvalidRequest, "Filament slot does not exist");
+        assigned_filament = {id, volume.value_or(""), filament};
     }
     void rename_object(const std::string& id, const std::string& name) override
     {
@@ -417,6 +425,7 @@ public:
     std::vector<InstanceTarget> mirrored;
     int mirror_axis {-1};
     std::pair<std::string, std::string> renamed;
+    std::tuple<std::string, std::string, int> assigned_filament;
     mutable nlohmann::json printer = {
         {"selected", {{"preset", "Bambu Lab A1 0.4 nozzle"}, {"model", "Bambu Lab A1"},
                       {"variant", "0.4"}, {"system", true}}},
@@ -1342,13 +1351,22 @@ TEST_CASE("Object delete, mirror and rename validate input and advance the revis
     REQUIRE(facade->renamed.second == "Držák");
     REQUIRE(revision == project["revision"].get<int>() + 3);
 
+    edit("object_filament_set", {{"object_id", "object_10"}, {"filament", 2}});
+    REQUIRE(facade->assigned_filament == std::make_tuple(std::string("object_10"), std::string(), 2));
+    edit("object_filament_set", {{"object_id", "object_10"}, {"volume_id", "volume_12"}, {"filament", 1}});
+    REQUIRE(std::get<1>(facade->assigned_filament) == "volume_12");
+    REQUIRE_THROWS_AS(edit("object_filament_set", {{"object_id", "object_10"}, {"filament", 0}}), AgentError);
+    REQUIRE_THROWS_AS(edit("object_filament_set", {{"object_id", "object_10"}, {"filament", 3}}), AgentError);
+    REQUIRE_THROWS_AS(edit("object_filament_set", {{"object_id", "object_10"}, {"volume_id", 5}, {"filament", 1}}), AgentError);
+    REQUIRE(revision == project["revision"].get<int>() + 5);
+
     REQUIRE_THROWS_AS(edit("object_delete", {{"targets", nlohmann::json::array()}}), AgentError);
     REQUIRE_THROWS_AS(edit("object_delete", {{"targets", {target, target}}}), AgentError);
     REQUIRE_THROWS_AS(edit("object_mirror", {{"targets", {target}}, {"axis", "w"}}), AgentError);
     REQUIRE_THROWS_AS(edit("object_rename", {{"object_id", "object_10"}, {"name", ""}}), AgentError);
     REQUIRE_THROWS_AS(edit("object_rename", {{"object_id", "object_10"}, {"name", "a\nb"}}), AgentError);
     REQUIRE_THROWS_AS(edit("object_rename", {{"object_id", "object_99"}, {"name", "x"}}), AgentError);
-    REQUIRE(revision == project["revision"].get<int>() + 3);
+    REQUIRE(revision == project["revision"].get<int>() + 5);
 }
 
 TEST_CASE("Filament slots read without a revision and color changes advance it", "[AgentBridge]")
@@ -1498,6 +1516,9 @@ TEST_CASE("Every native scene mutator requires an expected revision", "[AgentBri
     requires_revision({"delete", "object_delete",
                        {{"project_id", project["project_id"]},
                         {"targets", {{{"object_id", "object_10"}, {"instance_id", "instance_11"}}}}}});
+    requires_revision({"filament", "object_filament_set",
+                       {{"project_id", project["project_id"]}, {"object_id", "object_10"},
+                        {"filament", 1}}});
     requires_revision({"rename", "object_rename",
                        {{"project_id", project["project_id"]}, {"object_id", "object_10"},
                         {"name", "Part"}}});

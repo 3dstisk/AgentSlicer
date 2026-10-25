@@ -339,6 +339,14 @@ export const toolSchemas = {
       axis: z.enum(["x", "y", "z"]),
     })
     .strict(),
+  object_filament_set: z
+    .object({
+      ...projectWithRevision,
+      object_id: opaqueId,
+      volume_id: opaqueId.optional(),
+      filament: z.number().int().min(1).max(256),
+    })
+    .strict(),
   object_rename: z
     .object({
       ...projectWithRevision,
@@ -558,6 +566,7 @@ export const toolNames = [
   "object_delete",
   "object_mirror",
   "object_rename",
+  "object_filament_set",
   "scene_arrange",
   "plate_add",
   "plate_rename",
@@ -618,6 +627,8 @@ const descriptions: Record<ToolName, string> = {
   object_mirror:
     "Mirror object instances along a world axis around each instance's own center and keep them on the bed, like Orca's Mirror menu.",
   object_rename: "Rename one object.",
+  object_filament_set:
+    "Assign a 1-based filament slot (filaments_get) to an object, or with volume_id to one of its model parts or modifiers, like Orca's object list. Setting the object clears its parts' own assignments.",
   scene_arrange:
     "Start Orca's native arrange operation for every plate, or only the zero-based plate_index like Orca's plate arrange icon. Locked plates are skipped.",
   plate_add: "Add an empty plate like Orca's Add Plate toolbar action and return its zero-based plate_index.",
@@ -742,6 +753,8 @@ const sceneResultSchema = z
         object_id: opaqueId,
         object_index: z.number().int().nonnegative(),
         name: z.string(),
+        // 1-based filament slot; absent from images without object_filament_set.
+        filament: z.number().int().positive().optional(),
         bounds: boundsSchema,
         instances: z.array(
           z.object({
@@ -1740,6 +1753,7 @@ export function createAgentCommands(dependencies: AgentToolDependencies) {
     )),
     object_delete: defineCommand(toolSchemas.object_delete, projectResultSchema, (params) => bridgeTool(dependencies, "object_delete", params, projectResultSchema)),
     object_mirror: defineCommand(toolSchemas.object_mirror, projectResultSchema, (params) => bridgeTool(dependencies, "object_mirror", params, projectResultSchema)),
+    object_filament_set: defineCommand(toolSchemas.object_filament_set, projectResultSchema, (params) => bridgeTool(dependencies, "object_filament_set", params, projectResultSchema)),
     object_rename: defineCommand(toolSchemas.object_rename, projectResultSchema, (params) => bridgeTool(dependencies, "object_rename", params, projectResultSchema)),
     scene_arrange: defineCommand(toolSchemas.scene_arrange, runningJobStartResultSchema, (params) => bridgeTool(dependencies, "scene_arrange", params, runningJobStartResultSchema)),
     plate_add: defineCommand(toolSchemas.plate_add, plateResultSchema, (params) => bridgeTool(dependencies, "plate_add", params, plateResultSchema)),

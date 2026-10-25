@@ -25,6 +25,7 @@ const MUTATIONS = new Set([
   "object_delete",
   "object_mirror",
   "object_rename",
+  "object_filament_set",
   "scene_arrange",
   "plate_add",
   "plate_rename",

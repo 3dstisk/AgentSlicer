@@ -34,12 +34,16 @@ export const geometryManifestSchema = z.object({
       object_id: z.string(),
       object_index: z.number().int(),
       name: z.string(),
+      // 1-based filament slot; absent from images without object_filament_set.
+      filament: z.number().int().positive().optional(),
       bounds,
       volumes: z.array(
         z.object({
           volume_id: z.string(),
           name: z.string(),
           role: z.string(),
+          // 0: follows the object's filament.
+          filament: z.number().int().nonnegative().optional(),
           mesh_id: z.string(),
           transform: matrix,
         }),
