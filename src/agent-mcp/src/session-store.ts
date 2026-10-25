@@ -24,12 +24,14 @@ export const artifactSchema = z.object({
   filename: z.string(),
   bytes: z.number().int().nonnegative(),
   sha256: z.string(),
-  kind: z.enum(["checkpoint", "output", "geometry"]),
+  kind: z.enum(["checkpoint", "output", "geometry", "toolpaths"]),
   project_id: z.string().optional(),
   revision: z.number().int().optional(),
+  /** Toolpaths: the slice job they preview. */
+  slice_job_id: z.string().optional(),
   source_filename: z
     .string()
-    .regex(/^editor-[a-f0-9-]+\.(?:3mf|scene\.bin|gcode|gcode\.3mf)$/)
+    .regex(/^editor-[a-f0-9-]+\.(?:3mf|scene\.bin|toolpath\.bin|gcode|gcode\.3mf)$/)
     .optional(),
 });
 export const sessionRecordSchema = z.object({

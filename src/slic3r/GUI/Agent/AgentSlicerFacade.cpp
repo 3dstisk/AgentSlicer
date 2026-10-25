@@ -297,6 +297,65 @@ const char* option_control(const ConfigOptionDef& def)
     return "text";
 }
 
+// Preview moves above this are refused; ~26 bytes each in the export.
+constexpr std::size_t MaxToolpathMoves = 12'000'000;
+
+struct ToolpathColumns
+{
+    std::vector<float> positions;
+    std::vector<float> widths;
+    std::vector<float> heights;
+    std::vector<std::uint32_t> layers;
+    std::vector<std::uint8_t> types;
+    std::vector<std::uint8_t> roles;
+    std::vector<std::uint8_t> extruders;
+};
+
+// ASTP0001: 8-byte magic, little-endian uint32 JSON length, reserved uint32,
+// UTF-8 JSON padded to 4 bytes, then the column buffers, each 4-byte aligned:
+// positions float32 xyz, widths float32, heights float32, layers uint32,
+// types uint8, roles uint8 and extruders uint8 (one entry per move vertex).
+// Buffer offsets in the manifest are relative to the binary section.
+std::vector<std::uint8_t> encode_toolpaths(nlohmann::json manifest, const ToolpathColumns& data)
+{
+    static_assert(sizeof(float) == 4 && std::numeric_limits<float>::is_iec559);
+    std::vector<std::uint8_t> binary;
+    nlohmann::json buffers = nlohmann::json::object();
+    const auto pad = [&binary] { while (binary.size() % 4 != 0) binary.push_back(0); };
+    const auto append = [&](const char* name, const void* source, std::size_t bytes,
+                            std::size_t elements) {
+        pad();
+        buffers[name] = {{"offset", binary.size()}, {"length", elements}};
+        const auto* begin = static_cast<const std::uint8_t*>(source);
+        binary.insert(binary.end(), begin, begin + bytes);
+    };
+    for (const float value : data.positions)
+        if (!std::isfinite(value))
+            throw AgentError(ErrorCode::InvalidRequest, "Toolpaths contain a non-finite position");
+    append("positions", data.positions.data(), data.positions.size() * 4, data.positions.size());
+    append("widths", data.widths.data(), data.widths.size() * 4, data.widths.size());
+    append("heights", data.heights.data(), data.heights.size() * 4, data.heights.size());
+    append("layers", data.layers.data(), data.layers.size() * 4, data.layers.size());
+    append("types", data.types.data(), data.types.size(), data.types.size());
+    append("roles", data.roles.data(), data.roles.size(), data.roles.size());
+    append("extruders", data.extruders.data(), data.extruders.size(), data.extruders.size());
+    pad();
+    manifest["buffers"] = std::move(buffers);
+    std::string json = manifest.dump();
+    while (json.size() % 4 != 0)
+        json.push_back(' ');
+    std::vector<std::uint8_t> bytes {'A', 'S', 'T', 'P', '0', '0', '0', '1'};
+    const auto u32 = [&bytes](std::uint32_t value) {
+        for (unsigned shift = 0; shift < 32; shift += 8)
+            bytes.push_back(static_cast<std::uint8_t>(value >> shift));
+    };
+    u32(static_cast<std::uint32_t>(json.size()));
+    u32(0);
+    bytes.insert(bytes.end(), json.begin(), json.end());
+    bytes.insert(bytes.end(), binary.begin(), binary.end());
+    return bytes;
+}
+
 bool presets_are_dirty(const PresetBundle& bundle)
 {
     return bundle.printers.current_is_dirty() || bundle.prints.current_is_dirty() ||
@@ -927,6 +986,110 @@ public:
         m_plater.restore_project_for_agent(boost::filesystem::path(path.string()));
         for (size_t index = 0; index < m_plater.model().objects.size(); ++index)
             refresh_plate_membership(index);
+    }
+
+    // Orca's preview data for one sliced plate: every G-code move vertex with
+    // its type, line type, width, height and layer, plus the layer heights.
+    void start_toolpath_export(const std::filesystem::path& path, std::size_t plate_index) override
+    {
+        assert_gui_thread();
+        if (m_toolpath_future.valid())
+            throw AgentError(ErrorCode::MutationInProgress, "Toolpath export is already active");
+        PartPlateList& plates = m_plater.get_partplate_list();
+        PartPlate* plate = plate_index < static_cast<std::size_t>(plates.get_plate_count()) ?
+            plates.get_plate(static_cast<int>(plate_index)) : nullptr;
+        if (plate == nullptr || plate->get_slice_result() == nullptr || !plate->is_slice_result_valid())
+            throw AgentError(ErrorCode::InvalidRequest, "The plate has no valid slice result",
+                             {{"plate_index", plate_index}});
+        GCodeProcessorResult* result = plate->get_slice_result();
+        result->lock();
+        struct ResultUnlock {
+            GCodeProcessorResult* result;
+            ~ResultUnlock() { result->unlock(); }
+        } unlock {result};
+        if (result->moves.size() > MaxToolpathMoves)
+            throw AgentError(ErrorCode::InvalidRequest, "The slice has too many moves to preview",
+                             {{"moves", result->moves.size()}, {"max", MaxToolpathMoves}});
+
+        // Copy the compact columns on the GUI thread; encode and write off it.
+        auto data = std::make_shared<ToolpathColumns>();
+        const std::size_t count = result->moves.size();
+        data->positions.reserve(count * 3);
+        data->widths.reserve(count);
+        data->heights.reserve(count);
+        data->layers.reserve(count);
+        data->types.reserve(count);
+        data->roles.reserve(count);
+        data->extruders.reserve(count);
+        std::vector<float> layer_tops;
+        for (const GCodeProcessorResult::MoveVertex& move : result->moves) {
+            if (move.internal_only)
+                continue;
+            for (int axis = 0; axis < 3; ++axis)
+                data->positions.push_back(move.position[axis]);
+            data->widths.push_back(move.width);
+            data->heights.push_back(move.height);
+            data->layers.push_back(move.layer_id);
+            data->types.push_back(static_cast<std::uint8_t>(move.type));
+            data->roles.push_back(static_cast<std::uint8_t>(move.extrusion_role));
+            data->extruders.push_back(move.extruder_id);
+            if (move.type == EMoveType::Extrude) {
+                if (move.layer_id >= layer_tops.size())
+                    layer_tops.resize(move.layer_id + 1, 0.0f);
+                const float top = move.print_z > 0.0f ? move.print_z : move.position.z();
+                layer_tops[move.layer_id] = std::max(layer_tops[move.layer_id], top);
+            }
+        }
+        // Layers without extrusion keep the height below them.
+        for (std::size_t layer = 1; layer < layer_tops.size(); ++layer)
+            if (layer_tops[layer] <= 0.0f)
+                layer_tops[layer] = layer_tops[layer - 1];
+
+        nlohmann::json roles = nlohmann::json::array();
+        for (const LineTypeStyle& style : ROLE_STYLES)
+            roles.push_back({{"id", static_cast<int>(style.role)}, {"key", feature_key(style.role)},
+                             {"label", ExtrusionEntity::role_to_string(style.role)},
+                             {"color", style.color}});
+        const auto type_id = [](EMoveType type) { return static_cast<int>(type); };
+        nlohmann::json manifest {
+            {"plate_index", plate_index},
+            {"count", data->widths.size()},
+            {"layers", std::move(layer_tops)},
+            {"roles", std::move(roles)},
+            {"move_types", {
+                {"extrude", type_id(EMoveType::Extrude)}, {"travel", type_id(EMoveType::Travel)},
+                {"wipe", type_id(EMoveType::Wipe)}, {"retract", type_id(EMoveType::Retract)},
+                {"unretract", type_id(EMoveType::Unretract)}, {"seam", type_id(EMoveType::Seam)},
+                {"tool_change", type_id(EMoveType::Tool_change)}
+            }},
+            {"options", {
+                {{"key", "travel"}, {"label", "Travel"}, {"color", "#38489B"}},
+                {{"key", "wipe"}, {"label", "Wipe"}, {"color", "#FFFF00"}},
+                {{"key", "retract"}, {"label", "Retract"}, {"color", "#CD22D6"}},
+                {{"key", "unretract"}, {"label", "Unretract"}, {"color", "#49ADCF"}},
+                {{"key", "seams"}, {"label", "Seams"}, {"color", "#E6E6E6"}},
+                {{"key", "filament_changes"}, {"label", "Filament changes"}, {"color", "#C1BE63"}}
+            }}
+        };
+        m_toolpath_future = std::async(std::launch::async,
+            [data, manifest = std::move(manifest), path]() mutable -> FacadeJobState {
+            try {
+                const auto bytes = encode_toolpaths(std::move(manifest), *data);
+                write_exclusive_file(path, bytes.data(), bytes.size());
+                return {true, false, 1.0, {{"saved", true}}, nullptr};
+            } catch (const std::exception& error) {
+                return {true, true, 1.0, nullptr, {{"message", error.what()}}};
+            }
+        });
+    }
+
+    FacadeJobState toolpath_export_state() override
+    {
+        if (!m_toolpath_future.valid())
+            return {true, true, 1.0, nullptr, {{"message", "Toolpath export was not started"}}};
+        if (m_toolpath_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+            return {false, false, 0.5, nullptr, nullptr};
+        return m_toolpath_future.get();
     }
 
     void start_scene_export(const std::filesystem::path& path) override
@@ -3017,11 +3180,7 @@ private:
 
     // Orca's preview legend rows in libvgcode order, with libvgcode's default
     // colors (ViewerImpl DEFAULT_EXTRUSION_ROLES_COLORS / DEFAULT_OPTIONS_COLORS).
-    static nlohmann::json line_type_stats(const GCodeProcessorResult& result,
-                                          const PrintEstimatedStatistics& estimated,
-                                          const PrintConfig& config)
-    {
-        static constexpr std::array<LineTypeStyle, 19> ROLE_STYLES {{
+    static constexpr std::array<LineTypeStyle, 19> ROLE_STYLES {{
             {erPerimeter, "#FFE64D"}, {erExternalPerimeter, "#FF7D38"},
             {erOverhangPerimeter, "#1F1FFF"}, {erInternalInfill, "#B03029"},
             {erSolidInfill, "#9654CC"}, {erTopSolidInfill, "#F04040"},
@@ -3032,7 +3191,12 @@ private:
             {erBottomSurface, "#665CC7"}, {erInternalBridgeInfill, "#4D80BA"},
             {erBrim, "#003B6E"}, {erSupportTransition, "#004000"},
             {erMixed, "#808080"},
-        }};
+    }};
+
+    static nlohmann::json line_type_stats(const GCodeProcessorResult& result,
+                                          const PrintEstimatedStatistics& estimated,
+                                          const PrintConfig& config)
+    {
         constexpr std::size_t normal =
             static_cast<std::size_t>(PrintEstimatedStatistics::ETimeMode::Normal);
         std::map<ExtrusionRole, double> role_times;
@@ -3261,6 +3425,7 @@ private:
     }
 
     std::future<FacadeJobState> m_geometry_future;
+    std::future<FacadeJobState> m_toolpath_future;
     std::shared_ptr<std::atomic<bool>> m_geometry_cancel;
     Plater& m_plater;
     mutable bool m_import_active {false};

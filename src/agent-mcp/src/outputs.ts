@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { open, readdir, type FileHandle } from "node:fs/promises";
 import { join } from "node:path";
 
-const SUPPORTED_OUTPUT_EXTENSIONS = [".gcode", ".3mf", ".scene.bin"] as const;
+const SUPPORTED_OUTPUT_EXTENSIONS = [".gcode", ".3mf", ".scene.bin", ".toolpath.bin"] as const;
 
 function isSupportedOutputFilename(filename: string): boolean {
   return filename.length > 0 &&

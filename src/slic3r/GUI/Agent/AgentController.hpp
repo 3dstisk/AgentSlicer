@@ -114,6 +114,7 @@ private:
     nlohmann::json set_bed_type(const nlohmann::json& params);
     nlohmann::json get_filaments(const nlohmann::json& params) const;
     nlohmann::json get_process(const nlohmann::json& params) const;
+    nlohmann::json start_toolpath_export(const nlohmann::json& params);
     nlohmann::json get_printer_catalog(const nlohmann::json& params) const;
     nlohmann::json install_printer_model(const nlohmann::json& params);
     nlohmann::json get_object_settings(const nlohmann::json& params) const;

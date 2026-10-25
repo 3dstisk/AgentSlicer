@@ -55,7 +55,24 @@ export class TestNativeEngine implements SessionEngine {
       this.revision++;
       return { project_id: this.project, revision: this.revision };
     }
-    if (name === "project_save" || name === "scene_export") {
+    if (name === "slice_start") {
+      const job_id = `job-${++this.next}`;
+      this.jobs.set(job_id, {
+        job_id,
+        type: "slice",
+        state: "succeeded",
+        project_id: this.project,
+        source_revision: this.revision,
+        revision: this.revision,
+        result: { plate_index: params.plate_index, sliced: true },
+      });
+      return { job_id, state: "running" };
+    }
+    if (
+      name === "project_save" ||
+      name === "scene_export" ||
+      name === "toolpath_export"
+    ) {
       if (this.failSave) throw new Error("disk write failed");
       const path = join(this.outputs, String(params.output_path));
       await writeFile(path, JSON.stringify({ value: this.value }));

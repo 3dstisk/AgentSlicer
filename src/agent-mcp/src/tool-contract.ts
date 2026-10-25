@@ -196,7 +196,7 @@ const scale3 = z
   .strict();
 const unsignedSafeInteger = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 
-type OutputExtension = ".gcode" | ".gcode.3mf" | ".3mf" | ".scene.bin";
+type OutputExtension = ".gcode" | ".gcode.3mf" | ".3mf" | ".scene.bin" | ".toolpath.bin";
 
 function outputPath(extension: OutputExtension) {
   return z
@@ -286,6 +286,14 @@ export const toolSchemas = {
   project_create: z.object({}).strict(),
   project_restore: z.object({ path: z.string().startsWith("/workspace/").endsWith(".3mf"), expected_revision: revision }).strict(),
   scene_export: z.object({ ...projectWithRevision, output_path: outputPath(".scene.bin"), overwrite: z.boolean().default(false) }).strict(),
+  toolpath_export: z
+    .object({
+      ...projectWithRevision,
+      slice_job_id: opaqueId.describe("Succeeded slice_start job for the current revision"),
+      output_path: outputPath(".toolpath.bin"),
+      overwrite: z.boolean().default(false),
+    })
+    .strict(),
   model_import: z
     .object({
       ...projectWithRevision,
@@ -617,6 +625,7 @@ export const toolNames = [
   "upload_prepare",
   "project_create",
   "scene_export",
+  "toolpath_export",
   "model_import",
   "scene_get",
   "object_transform",
@@ -677,6 +686,8 @@ export interface AgentToolDependencies extends ToolDependencies {
 
 const descriptions: Record<ToolName, string> = {
   scene_export: "Export a revision-bound native scene manifest and binary mesh buffers.",
+  toolpath_export:
+    "Export the preview moves of a completed slice (ASTP0001: JSON manifest with layer heights, Orca line-type colors and move type ids, then per-vertex position, width, height, layer, move type, line type and extruder buffers) for rendering the toolpaths.",
   slicer_status: "Report native Orca bridge readiness, active project, revision, jobs, and capabilities.",
   upload_prepare:
     "Create a single-use authenticated HTTP upload ticket for a local STL, OBJ, 3MF, STEP, or STP file. PUT the raw bytes to the returned same-origin upload_path, then pass workspace_path to model_import with the same filename as name. Detailed guidance is available at agentslicer://docs/upload.",
@@ -1453,6 +1464,19 @@ const projectSaveJobSchema = z
       });
     }
   });
+const toolpathExportJobSchema = z
+  .object({
+    ...jobBase,
+    type: z.literal("toolpath_export"),
+    metadata: z
+      .object({ slice_job_id: opaqueId, output_path: outputPath(".toolpath.bin"), plate_index: unsignedSafeInteger })
+      .strict(),
+    result: z
+      .object({ path: artifactPath(".toolpath.bin"), bytes: z.number().int().nonnegative() })
+      .strict()
+      .nullable(),
+  })
+  .strict();
 const sceneExportJobSchema = z.object({ ...jobBase, type: z.literal("scene_export"),
   metadata: z.object({ output_path: outputPath(".scene.bin") }).strict(),
   result: z.object({ path: artifactPath(".scene.bin"), bytes: z.number().int().nonnegative() }).strict().nullable(),
@@ -1466,6 +1490,7 @@ export const jobResultSchema = z.discriminatedUnion("type", [
   gcode3mfExportJobSchema,
   projectSaveJobSchema,
   sceneExportJobSchema,
+  toolpathExportJobSchema,
 ]);
 
 function objectResult(value: unknown): Record<string, unknown> {
@@ -1930,6 +1955,7 @@ export function createAgentCommands(dependencies: AgentToolDependencies) {
     project_create: defineCommand(toolSchemas.project_create, projectResultSchema, () => bridgeTool(dependencies, "project_create", {}, projectResultSchema)),
     project_restore: defineCommand(toolSchemas.project_restore, projectResultSchema, (params) => bridgeTool(dependencies, "project_restore", params, projectResultSchema)),
     scene_export: defineCommand(toolSchemas.scene_export, runningJobStartResultSchema, (params) => bridgeTool(dependencies, "scene_export", params, runningJobStartResultSchema)),
+    toolpath_export: defineCommand(toolSchemas.toolpath_export, runningJobStartResultSchema, (params) => bridgeTool(dependencies, "toolpath_export", params, runningJobStartResultSchema)),
     model_import: defineCommand(toolSchemas.model_import, registeredJobStartResultSchema, (params) => bridgeTool(dependencies, "model_import", params, registeredJobStartResultSchema)),
     scene_get: defineCommand(toolSchemas.scene_get, sceneResultSchema, (params) => bridgeTool(dependencies, "scene_get", params, sceneResultSchema)),
     object_transform: defineCommand(toolSchemas.object_transform, projectResultSchema, (params) => bridgeTool(dependencies, "object_transform", params, projectResultSchema)),

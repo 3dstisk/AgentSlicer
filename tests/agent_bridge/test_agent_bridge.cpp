@@ -68,6 +68,12 @@ public:
         write_exclusive_file(path, "ASGEOM01", 8);
     }
     FacadeJobState scene_export_state() override { return {true, false, 1.0, {}, nullptr}; }
+    void start_toolpath_export(const std::filesystem::path& path, std::size_t plate_index) override
+    {
+        toolpath_plate_index = plate_index;
+        write_exclusive_file(path, "ASTP0001", 8);
+    }
+    FacadeJobState toolpath_export_state() override { return {true, false, 1.0, {}, nullptr}; }
     void start_model_import(const std::filesystem::path& path,
                             const std::string& display_name) override
     {
@@ -466,6 +472,7 @@ public:
     std::string filament_color = "#F2754E";
     std::vector<nlohmann::json> object_settings_calls;
     std::size_t filament_slots = 1;
+    std::size_t toolpath_plate_index = 0;
     nlohmann::json installed_printer;
     std::vector<InstanceTarget> mirrored;
     int mirror_axis {-1};
@@ -2592,6 +2599,23 @@ TEST_CASE("Slice and export jobs preserve revision and publish staged artifacts"
     REQUIRE(facade->export_path.parent_path() == workspace.root / "artifacts");
     REQUIRE_FALSE(std::filesystem::exists(facade->export_path));
     REQUIRE(std::filesystem::is_empty(workspace.root / "artifacts"));
+
+    const auto toolpaths = controller.handle(
+        {"toolpaths", "toolpath_export",
+         {{"project_id", project["project_id"]}, {"expected_revision", project["revision"]},
+          {"slice_job_id", slice["job_id"]}, {"output_path", "plate.toolpath.bin"}}});
+    const auto toolpaths_done = controller.handle(
+        {"toolpaths-get", "job_get", {{"job_id", toolpaths["job_id"]}}});
+    REQUIRE(toolpaths_done["state"] == "succeeded");
+    REQUIRE(toolpaths_done["metadata"]["plate_index"] == 1);
+    REQUIRE(facade->toolpath_plate_index == 1);
+    REQUIRE(std::filesystem::is_regular_file(output_root / "plate.toolpath.bin"));
+    REQUIRE_THROWS_AS(controller.handle({"toolpaths-bad", "toolpath_export",
+                                         {{"project_id", project["project_id"]},
+                                          {"expected_revision", project["revision"]},
+                                          {"slice_job_id", "job_missing"},
+                                          {"output_path", "other.toolpath.bin"}}}),
+                      AgentError);
 
     const auto gcode_3mf_started = controller.handle(
         {"export-3mf", "gcode_3mf_export",

@@ -297,6 +297,49 @@ describe("operator session recovery and ownership", () => {
     await artifact.handle.close();
   });
 
+  it("exports toolpaths of a session slice once per revision and rejects them when stale", async () => {
+    const { manager, engine } = await fixture();
+    const created = await manager.create("owner", "toolpaths", "Toolpaths");
+    const opened = await manager.open(created.session.id, created.token, actor);
+    const native = opened.native!;
+    const slice = await manager.command(
+      created.session.id,
+      created.token,
+      opened.lease_token,
+      "slice_start",
+      { project_id: native.project_id, expected_revision: native.revision, plate_index: 0 },
+    );
+    const jobId = String(slice.result.job_id);
+    await manager.command(created.session.id, created.token, opened.lease_token, "job_get", {
+      job_id: jobId,
+    });
+    await expect(
+      manager.toolpaths(created.session.id, created.token, opened.lease_token, native.revision, "job-missing"),
+    ).rejects.toMatchObject({ code: "job_not_owned" });
+    const first = await manager.toolpaths(
+      created.session.id,
+      created.token,
+      opened.lease_token,
+      native.revision,
+      jobId,
+    );
+    const again = await manager.toolpaths(
+      created.session.id,
+      created.token,
+      opened.lease_token,
+      native.revision,
+      jobId,
+    );
+    expect(again.artifact_id).toBe(first.artifact_id);
+    const artifact = await manager.artifact(created.session.id, created.token, first.artifact_id);
+    expect(artifact.kind).toBe("toolpaths");
+    await artifact.handle.close();
+    engine.revision++;
+    await expect(
+      manager.artifact(created.session.id, created.token, first.artifact_id),
+    ).rejects.toMatchObject({ code: "revision_conflict" });
+  });
+
   it("reclaims a dedicated worker after a reset occurred before metadata publication", async () => {
     const f = await fixture();
     const created = await f.manager.create("owner", "reset", "Reset recovery");

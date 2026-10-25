@@ -14,6 +14,7 @@ describe("MCP tool schemas", () => {
       "upload_prepare",
       "project_create",
       "scene_export",
+      "toolpath_export",
       "model_import",
       "scene_get",
       "object_transform",

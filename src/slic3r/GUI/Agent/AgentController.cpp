@@ -380,6 +380,8 @@ nlohmann::json AgentController::handle_prepared(const PreparedRequest& prepared)
             return restore_project(request.params, prepared.import_snapshot);
         if (request.method == "scene_export")
             return start_scene_export(request.params);
+        if (request.method == "toolpath_export")
+            return start_toolpath_export(request.params);
         if (request.method == "scene_get")
             return get_scene(request.params);
         if (request.method == "object_transform")
@@ -553,6 +555,8 @@ void AgentController::refresh_jobs()
             native = m_facade->project_save_state();
         else if (job.type == "scene_export")
             native = m_facade->scene_export_state();
+        else if (job.type == "toolpath_export")
+            native = m_facade->toolpath_export_state();
         else
             continue;
         if (job.type == "project_save" && native.metadata.is_object()) {
@@ -573,7 +577,8 @@ void AgentController::refresh_jobs()
         job.warnings = native.warnings;
         if (!native.complete)
             continue;
-        if (job.type == "scene_export") capture_staging_identity(job);
+        if (job.type == "scene_export" || job.type == "toolpath_export")
+            capture_staging_identity(job);
         if (job.invalidated) {
             job.state = JobState::Failed;
             job.result = nullptr;
@@ -599,7 +604,8 @@ void AgentController::refresh_jobs()
                 job.result["revision"] = m_revision;
             }
             if (job.type == "gcode_export" || job.type == "gcode_3mf_export" ||
-                job.type == "project_save" || job.type == "scene_export")
+                job.type == "project_save" || job.type == "scene_export" ||
+                job.type == "toolpath_export")
                 finish_artifact(job, std::move(native));
             else
                 job.state = JobState::Succeeded;
@@ -770,7 +776,8 @@ nlohmann::json AgentController::status() const
                           "toolpath_render",
                           "desktop_capture", "preset_control", "settings_control",
                           "job_registry", "job_cancel", "slice", "gcode_export",
-                          "gcode_3mf_export", "project_save", "project_restore", "scene_export"}}
+                          "gcode_3mf_export", "project_save", "project_restore", "scene_export",
+                          "toolpath_export"}}
     };
 }
 
@@ -837,6 +844,50 @@ nlohmann::json AgentController::start_scene_export(const nlohmann::json& params)
         Job& failed = m_jobs.at(id);
         failed.state = JobState::Failed;
         failed.error = {{"code", "scene_export_failed"}, {"message", error.what()}, {"details", nullptr}};
+    }
+    return {{"job_id", id}, {"state", job_state_name(m_jobs.at(id).state)}};
+}
+
+nlohmann::json AgentController::start_toolpath_export(const nlohmann::json& params)
+{
+    if (!params.contains("expected_revision"))
+        throw AgentError(ErrorCode::InvalidRequest, "expected_revision is required");
+    if (!params.contains("slice_job_id") || !params.at("slice_job_id").is_string())
+        throw AgentError(ErrorCode::InvalidRequest, "slice_job_id must be a string");
+    const auto output = resolve_output_file(params, ".toolpath.bin");
+    std::lock_guard<std::mutex> lock(m_mutex);
+    require_active_project(params);
+    require_no_active_mutation("Another native job is active");
+    const auto source = m_jobs.find(params.at("slice_job_id").get<std::string>());
+    if (source == m_jobs.end() || source->second.type != "slice" ||
+        source->second.state != JobState::Succeeded ||
+        source->second.project_id != *m_project_id ||
+        source->second.source_revision != m_revision)
+        throw AgentError(ErrorCode::InvalidRequest,
+                         "slice_job_id must identify a succeeded slice for this project revision");
+    const std::size_t plate_index = source->second.metadata.at("plate_index").get<std::size_t>();
+    const std::string id = make_opaque_id("job");
+    Job job;
+    job.id = id;
+    job.type = "toolpath_export";
+    job.state = JobState::Running;
+    job.facade_managed = true;
+    job.project_id = *m_project_id;
+    job.source_revision = m_revision;
+    job.metadata = {{"slice_job_id", params.at("slice_job_id")},
+                    {"output_path", params.at("output_path")},
+                    {"plate_index", plate_index}};
+    job.output_path = output;
+    job.staging_path = make_staging_path(output);
+    job.overwrite = params.value("overwrite", false);
+    m_jobs.emplace(id, std::move(job));
+    try {
+        m_facade->start_toolpath_export(m_jobs.at(id).staging_path, plate_index);
+        capture_staging_identity(m_jobs.at(id));
+    } catch (const std::exception& error) {
+        Job& failed = m_jobs.at(id);
+        failed.state = JobState::Failed;
+        failed.error = {{"code", "toolpath_export_failed"}, {"message", error.what()}, {"details", nullptr}};
     }
     return {{"job_id", id}, {"state", job_state_name(m_jobs.at(id).state)}};
 }

@@ -144,3 +144,23 @@ and unknown or foreign-session artifacts return 404 after session authorization.
 The browser decoder validates identity, lengths, finite vertices, triangle
 indices, references and matrix shape before constructing renderer buffers.
 Geometry is a revision-scoped snapshot, not a persistence format for recovery.
+
+## Toolpath contract
+
+`POST .../toolpaths` takes `{expected_revision, slice_job_id}` for a succeeded
+`slice_start` job of the session and returns `{artifact_id, bytes}`; the same
+slice at the same revision reuses its artifact. Native copies the plate's
+G-code move columns on the GUI thread and encodes them off-thread with
+`toolpath_export`. The adapter keeps at most eight toolpath artifacts, all of
+the current revision; older or stale ones are removed, and stale ones return
+409 from the artifact route.
+
+The `.toolpath.bin` container starts with `ASTP0001`, a little-endian uint32
+padded JSON length and a reserved zero uint32, then padded UTF-8 JSON and the
+binary section. The manifest lists `plate_index`, the vertex `count`, the top Z
+of each layer, Orca's line-type `roles` (native ExtrusionRole id, key, label,
+color), the native `move_types` ids, the option rows' colors and the 4-byte
+aligned `buffers`: float32 XYZ positions, float32 widths and heights, uint32
+layers and uint8 move types, line types and extruders, one entry per move
+vertex. A segment runs from the previous vertex to its own position, like
+Orca's G-code viewer. Download it through the plain artifact route.

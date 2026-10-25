@@ -18,6 +18,8 @@ import { nativeJobSchema, type SessionEngine } from "./session-engine.js";
 import { UploadManager } from "./uploads.js";
 
 const SESSION_OUTPUT_LIMIT = 32;
+/** Preview toolpaths kept per session (plates of the current revision). */
+const TOOLPATH_ARTIFACT_LIMIT = 8;
 const MUTATIONS = new Set([
   "model_import",
   "object_transform",
@@ -993,6 +995,103 @@ export class SessionManager {
       };
     });
   }
+  /**
+   * Exports the preview moves of one of this session's completed slices as a
+   * revision-bound artifact (ASTP0001), keeping the latest few.
+   */
+  async toolpaths(
+    id: string,
+    token: string | undefined,
+    leaseToken: string,
+    expectedRevision: number,
+    sliceJobId: string,
+  ) {
+    return this.exclusive(async () => {
+      const store = await this.store();
+      const session = store.authorize(id, token);
+      this.lease(session, leaseToken, store);
+      this.requireIdle(session);
+      const tracked = session.jobs[sliceJobId];
+      if (tracked?.command !== "slice_start" || tracked.state !== "succeeded")
+        throw new SessionError(
+          "job_not_owned",
+          "Toolpaths need a succeeded slice of this session",
+          403,
+        );
+      const status = await this.options.engine.status();
+      if (
+        status.project_id !== session.native!.project_id ||
+        status.revision !== expectedRevision
+      )
+        throw new SessionError(
+          "revision_conflict",
+          "Toolpath export requires the current native revision",
+        );
+      const reused = session.artifacts.find(
+        (item) =>
+          item.kind === "toolpaths" &&
+          item.slice_job_id === sliceJobId &&
+          item.revision === expectedRevision,
+      );
+      if (reused) return { artifact_id: reused.id, bytes: reused.bytes };
+      const directory = this.directory(id);
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      const nativeName = `editor-${randomUUID()}.toolpath.bin`;
+      const start = await this.options.engine.command("toolpath_export", {
+        project_id: status.project_id,
+        expected_revision: expectedRevision,
+        slice_job_id: sliceJobId,
+        output_path: nativeName,
+      });
+      const job = await this.options.engine.wait(
+        z.object({ job_id: z.string() }).parse(start).job_id,
+      );
+      const result = z
+        .object({ path: z.string(), bytes: z.number() })
+        .parse(job.result);
+      if (basename(result.path) !== nativeName)
+        throw new SessionError(
+          "artifact_not_owned",
+          "Native output identity differs from the requested session artifact",
+          502,
+        );
+      const saved = await this.collectOutput(
+        result.path,
+        result.bytes,
+        directory,
+        `${randomUUID()}.toolpath.bin`,
+        "toolpaths",
+      );
+      const artifact = {
+        ...saved,
+        project_id: status.project_id!,
+        revision: expectedRevision,
+        slice_job_id: sliceJobId,
+      };
+      // Keep the newest toolpaths of the current revision only.
+      const current = session.artifacts.filter(
+        (item) => item.kind === "toolpaths" && item.revision === expectedRevision,
+      );
+      const stale = [
+        ...session.artifacts.filter(
+          (item) => item.kind === "toolpaths" && item.revision !== expectedRevision,
+        ),
+        ...current.slice(0, Math.max(0, current.length - TOOLPATH_ARTIFACT_LIMIT + 1)),
+      ];
+      const previousArtifacts = session.artifacts;
+      session.artifacts = [
+        ...session.artifacts.filter((item) => !stale.includes(item)),
+        artifact,
+      ];
+      await this.publishArtifactRecord(store, session, artifact, () => {
+        session.artifacts = previousArtifacts;
+      });
+      await this.cleanupNativeSource(artifact);
+      for (const old of stale)
+        await rm(join(directory, old.filename), { force: true });
+      return { artifact_id: artifact.id, bytes: artifact.bytes };
+    });
+  }
   async artifact(id: string, token: string | undefined, artifactId: string) {
     const session = (await this.store()).authorize(id, token);
     const artifact = [...session.artifacts, ...session.checkpoints].find(
@@ -1004,7 +1103,7 @@ export class SessionManager {
         "Artifact does not belong to this session",
         404,
       );
-    if (artifact.kind === "geometry") {
+    if (artifact.kind === "geometry" || artifact.kind === "toolpaths") {
       const current = await this.options.engine.status();
       if (
         !session.native ||
@@ -1013,7 +1112,9 @@ export class SessionManager {
       )
         throw new SessionError(
           "revision_conflict",
-          "Scene geometry is stale; export the current revision",
+          artifact.kind === "geometry"
+            ? "Scene geometry is stale; export the current revision"
+            : "Toolpaths are stale; slice the current revision again",
         );
     }
     const handle = await open(

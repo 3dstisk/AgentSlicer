@@ -93,6 +93,9 @@ public:
     virtual nlohmann::json filament_state() const = 0;
     // Orca's Process tab in Simple mode: presets, pages, groups and options.
     virtual nlohmann::json process_state() const = 0;
+    // Writes Orca's preview moves of a sliced plate (ASTP0001) off the GUI thread.
+    virtual void start_toolpath_export(const std::filesystem::path& path, std::size_t plate_index) = 0;
+    virtual FacadeJobState toolpath_export_state() = 0;
     // Orca's object settings tab for the given objects: effective values with
     // their overrides, Simple mode.
     virtual nlohmann::json object_settings(const std::vector<std::string>& object_ids) const = 0;

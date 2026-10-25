@@ -221,6 +221,29 @@ export function createSessionHttp(manager: SessionManager) {
           );
           return;
         }
+        if (request.method === "POST" && action === "toolpaths") {
+          const input = parse(
+            z
+              .object({
+                expected_revision: z.number().int().nonnegative(),
+                slice_job_id: z.string().min(1).max(128),
+              })
+              .strict(),
+            await body(request),
+          );
+          json(
+            response,
+            201,
+            await manager.toolpaths(
+              id,
+              token,
+              lease,
+              input.expected_revision,
+              input.slice_job_id,
+            ),
+          );
+          return;
+        }
         const artifactMatch =
           /^artifacts\/([^/]+)(?:\/(manifest|binary))?$/.exec(action);
         if (request.method === "GET" && artifactMatch) {
