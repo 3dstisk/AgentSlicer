@@ -160,6 +160,19 @@ public:
         --plate_count;
     }
     nlohmann::json printer_state() const override { return printer; }
+    nlohmann::json filament_state() const override
+    {
+        return {{"slots", {{{"index", 0}, {"preset", "Generic PLA"}, {"label", "Generic PLA"},
+                            {"color", filament_color}}}},
+                {"presets", nlohmann::json::array()},
+                {"dirty", false}};
+    }
+    void set_filament_color(std::size_t index, const std::string& color) override
+    {
+        if (index != 0)
+            throw AgentError(ErrorCode::InvalidRequest, "Filament slot does not exist");
+        filament_color = color;
+    }
     void delete_instances(const std::vector<InstanceTarget>& targets) override
     {
         deleted = targets;
@@ -400,6 +413,7 @@ public:
     std::set<std::size_t> locked_plates;
     std::optional<std::size_t> front_plate;
     std::vector<InstanceTarget> deleted;
+    std::string filament_color = "#F2754E";
     std::vector<InstanceTarget> mirrored;
     int mirror_axis {-1};
     std::pair<std::string, std::string> renamed;
@@ -1337,6 +1351,38 @@ TEST_CASE("Object delete, mirror and rename validate input and advance the revis
     REQUIRE(revision == project["revision"].get<int>() + 3);
 }
 
+TEST_CASE("Filament slots read without a revision and color changes advance it", "[AgentBridge]")
+{
+    auto facade = std::make_shared<FakeFacade>();
+    AgentController controller(facade);
+    const auto project = controller.handle({"create", "project_create", {}});
+    const auto filaments = controller.handle(
+        {"filaments", "filaments_get", {{"project_id", project["project_id"]}}});
+    REQUIRE(filaments["slots"][0]["preset"] == "Generic PLA");
+    REQUIRE(filaments["revision"] == project["revision"]);
+
+    const auto changed = controller.handle(
+        {"color", "filament_color_set", {{"project_id", project["project_id"]},
+                                         {"expected_revision", project["revision"]},
+                                         {"index", 0}, {"color", "#00a2ff"}}});
+    REQUIRE(changed["revision"] == project["revision"].get<int>() + 1);
+    REQUIRE(facade->filament_color == "#00A2FF");
+    for (const nlohmann::json& color : {nlohmann::json("blue"), nlohmann::json("#12345"),
+                                        nlohmann::json("#GG0000"), nlohmann::json(3)})
+        REQUIRE_THROWS_AS(
+            controller.handle({"bad", "filament_color_set",
+                               {{"project_id", project["project_id"]},
+                                {"expected_revision", changed["revision"]},
+                                {"index", 0}, {"color", color}}}),
+            AgentError);
+    REQUIRE_THROWS_AS(
+        controller.handle({"slot", "filament_color_set",
+                           {{"project_id", project["project_id"]},
+                            {"expected_revision", changed["revision"]},
+                            {"index", 4}, {"color", "#FFFFFF"}}}),
+        AgentError);
+}
+
 TEST_CASE("Printer state reads without a revision and bed type changes advance it", "[AgentBridge]")
 {
     auto facade = std::make_shared<FakeFacade>();
@@ -1455,6 +1501,8 @@ TEST_CASE("Every native scene mutator requires an expected revision", "[AgentBri
     requires_revision({"rename", "object_rename",
                        {{"project_id", project["project_id"]}, {"object_id", "object_10"},
                         {"name", "Part"}}});
+    requires_revision({"color", "filament_color_set",
+                       {{"project_id", project["project_id"]}, {"index", 0}, {"color", "#FFFFFF"}}});
     requires_revision({"bed", "bed_type_set",
                        {{"project_id", project["project_id"]}, {"bed_type", "Cool Plate"}}});
     for (const char* method : {"plate_rename", "plate_delete", "plate_lock",

@@ -1628,18 +1628,15 @@ public:
 
         PresetCollection& filaments = filament_presets(candidate);
         const bool fff = candidate.printers.get_edited_preset().printer_technology() == ptFFF;
-        size_t expected_filaments = 1;
-        if (fff) {
-            const auto* diameters = candidate.printers.get_edited_preset().config.option<ConfigOptionFloats>(
-                "nozzle_diameter");
-            expected_filaments = diameters == nullptr ? 1 : diameters->values.size();
-        }
+        // One preset per filament slot; multi-color projects can have more
+        // slots than the printer has extruders.
+        const size_t expected_filaments = fff ? std::max<size_t>(1, candidate.filament_presets.size()) : 1;
         std::vector<std::string> requested = fff ? candidate.filament_presets :
             std::vector<std::string>{filaments.get_selected_preset_name()};
         if (selection.contains("filaments"))
             requested = selection.at("filaments").get<std::vector<std::string>>();
         if (requested.size() != expected_filaments)
-            throw AgentError(ErrorCode::InvalidRequest, "Filament preset count must match printer extruders",
+            throw AgentError(ErrorCode::InvalidRequest, "Filament preset count must match the filament slots",
                              {{"expected", expected_filaments}, {"actual", requested.size()}});
         for (const std::string& name : requested) {
             Preset* preset = filaments.find_preset(name, false, true);
@@ -1755,6 +1752,77 @@ public:
             {"user_presets", std::move(user_presets)},
             {"bed", std::move(bed)}
         };
+    }
+
+    nlohmann::json filament_state() const override
+    {
+        assert_gui_thread();
+        const PresetBundle& bundle = *wxGetApp().preset_bundle;
+        const auto first = [](const Preset& preset, const char* key) {
+            const auto* values = preset.config.option<ConfigOptionStrings>(key);
+            return values != nullptr && !values->values.empty() ? values->values.front() : std::string();
+        };
+        const auto* colors = bundle.project_config.option<ConfigOptionStrings>("filament_colour");
+        // Orca's combo shows preset labels: the alias, "*" when edited.
+        const auto label_of = [&bundle](const std::string& name) {
+            const Preset* preset = filament_presets(bundle).find_preset(name, false);
+            return preset != nullptr ? preset->label(false) : name;
+        };
+        nlohmann::json slots = nlohmann::json::array();
+        if (bundle.printers.get_edited_preset().printer_technology() == ptFFF)
+            for (std::size_t index = 0; index < bundle.filament_presets.size(); ++index)
+                slots.push_back({{"index", index},
+                                 {"preset", bundle.filament_presets[index]},
+                                 {"label", label_of(bundle.filament_presets[index])},
+                                 {"color", colors != nullptr && index < colors->values.size() ?
+                                               colors->values[index] : std::string()}});
+        nlohmann::json presets = nlohmann::json::array();
+        for (const Preset& preset : filament_presets(bundle).get_presets()) {
+            if (preset.is_default || !preset.is_visible)
+                continue;
+            std::string vendor = first(preset, "filament_vendor");
+            // Orca's filament combo shows Bambu Lab filaments as "Bambu".
+            if (vendor == "Bambu Lab")
+                vendor = "Bambu";
+            presets.push_back({{"name", preset.name}, {"label", preset.label(false)},
+                               {"vendor", vendor},
+                               {"type", first(preset, "filament_type")},
+                               {"system", preset.is_system},
+                               {"compatible", preset.is_compatible}});
+        }
+        return {{"slots", std::move(slots)}, {"presets", std::move(presets)},
+                {"dirty", presets_are_dirty(bundle)}};
+    }
+
+    void set_filament_color(std::size_t index, const std::string& color) override
+    {
+        assert_gui_thread();
+        DynamicPrintConfig& project = wxGetApp().preset_bundle->project_config;
+        const auto* current = project.option<ConfigOptionStrings>("filament_colour");
+        if (current == nullptr || index >= current->values.size())
+            throw AgentError(ErrorCode::InvalidRequest, "Filament slot does not exist",
+                             {{"index", index}});
+        // Same steps as Orca's filament color picker (PresetComboBox): solid
+        // color, its multi-color entry, apply and announce the change.
+        const auto with_value = [&](const char* key, const std::string& value) {
+            auto* option = static_cast<ConfigOptionStrings*>(project.option(key, true)->clone());
+            if (option->values.size() < current->values.size())
+                option->values.resize(current->values.size(), option->values.empty() ?
+                                                                  std::string() : option->values.back());
+            option->values[index] = value;
+            return option;
+        };
+        DynamicPrintConfig change;
+        change.set_key_value("filament_colour", with_value("filament_colour", color));
+        change.set_key_value("filament_colour_type", with_value("filament_colour_type", "1"));
+        change.set_key_value("filament_multi_colour", with_value("filament_multi_colour", color));
+        project.apply(change);
+        m_plater.on_config_change(change);
+        m_plater.update_project_dirty_from_presets();
+        m_plater.sidebar().update_presets(Preset::TYPE_FILAMENT);
+        auto* event = new wxCommandEvent(EVT_FILAMENT_COLOR_CHANGED);
+        event->SetInt(int(index));
+        wxQueueEvent(&m_plater, event);
     }
 
     void set_bed_type(const std::string& bed_type) override

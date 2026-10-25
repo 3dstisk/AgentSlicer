@@ -29,6 +29,8 @@ describe("MCP tool schemas", () => {
       "plate_move_to_front",
       "printer_get",
       "bed_type_set",
+      "filaments_get",
+      "filament_color_set",
       "scene_render",
       "toolpath_render",
       "desktop_capture",
@@ -81,6 +83,14 @@ describe("MCP tool schemas", () => {
     expect(toolSchemas.model_import.safeParse({ ...base, name: "dir/a.stl" }).success).toBe(false);
     expect(toolSchemas.model_import.safeParse({ ...base, name: "a\\b.stl" }).success).toBe(false);
     expect(toolSchemas.model_import.safeParse({ ...base, name: "" }).success).toBe(false);
+  });
+
+  it("requires a slot index and #RRGGBB for filament colors", () => {
+    const base = { project_id: "project_1", expected_revision: 2, index: 0 };
+    expect(toolSchemas.filament_color_set.safeParse({ ...base, color: "#f2754e" }).success).toBe(true);
+    for (const color of ["f2754e", "#f2754", "#GG754E", "red"])
+      expect(toolSchemas.filament_color_set.safeParse({ ...base, color }).success).toBe(false);
+    expect(toolSchemas.filaments_get.safeParse({ project_id: "project_1" }).success).toBe(true);
   });
 
   it("requires a revision and a bed type key to set the bed type", () => {

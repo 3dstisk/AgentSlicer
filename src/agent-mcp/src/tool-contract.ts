@@ -374,6 +374,14 @@ export const toolSchemas = {
     .object({ ...projectWithRevision, plate_index: unsignedSafeInteger })
     .strict(),
   printer_get: z.object(projectSnapshot).strict(),
+  filaments_get: z.object(projectSnapshot).strict(),
+  filament_color_set: z
+    .object({
+      ...projectWithRevision,
+      index: unsignedSafeInteger,
+      color: z.string().regex(/^#[0-9A-Fa-f]{6}$/, "color must be #RRGGBB"),
+    })
+    .strict(),
   bed_type_set: z
     .object({ ...projectWithRevision, bed_type: z.string().min(1).max(64) })
     .strict(),
@@ -558,6 +566,8 @@ export const toolNames = [
   "plate_move_to_front",
   "printer_get",
   "bed_type_set",
+  "filaments_get",
+  "filament_color_set",
   "scene_render",
   "toolpath_render",
   "desktop_capture",
@@ -618,6 +628,9 @@ const descriptions: Record<ToolName, string> = {
   plate_move_to_front: "Move one zero-based plate to index 0 together with its instances, like Orca's plate icon.",
   printer_get:
     "Read Orca's sidebar printer section: the selected printer preset, model and nozzle variant, whether presets have unsaved edits, visible system printer models with their variant presets and cover image path, user printer presets, and the bed type with the types the printer supports (null when Orca hides the bed type).",
+  filaments_get:
+    "Read Orca's sidebar filament section: each zero-based filament slot's preset and #RRGGBB color, the visible filament presets with vendor, type, system/user origin and printer compatibility, and whether presets have unsaved edits. Change slot presets with presets_select filaments (one name per slot).",
+  filament_color_set: "Set one zero-based filament slot's solid #RRGGBB color like Orca's color picker.",
   bed_type_set:
     "Set the project bed type (a printer_get bed type key such as \"Textured PEI Plate\") like Orca's bed type selector.",
   scene_render:
@@ -629,7 +642,7 @@ const descriptions: Record<ToolName, string> = {
   presets_list:
     "List exact printer, process, and filament preset names and Orca's compatibility/selection state. Scopes are printer hardware, print process, and filament.",
   presets_select:
-    "Atomically select exact preset names. Printer and process are single presets; filaments are ordered by extruder. Selecting only a printer keeps compatible process and filament presets and replaces incompatible ones like Orca's printer selector. Exact already-selected names are revision-neutral. discard_dirty must be explicit before unsaved edits are discarded.",
+    "Atomically select exact preset names. Printer and process are single presets; filaments list one preset per filament slot (filaments_get). Selecting only a printer keeps compatible process and filament presets and replaces incompatible ones like Orca's printer selector. Exact already-selected names are revision-neutral. discard_dirty must be explicit before unsaved edits are discarded.",
   settings_describe:
     "Discover paginated Orca settings by key, label, description, or scope. Each result declares its native value type, scope, editability, unit text, numeric limits, and enum values; never infer units or values.",
   settings_get:
@@ -680,6 +693,30 @@ const printerResultSchema = z
       })
       .strict()
       .nullable(),
+  })
+  .strict();
+const filamentsResultSchema = z
+  .object({
+    project_id: opaqueId,
+    revision,
+    slots: z.array(
+      z
+        .object({ index: unsignedSafeInteger, preset: z.string(), label: z.string(), color: z.string() })
+        .strict(),
+    ),
+    presets: z.array(
+      z
+        .object({
+          name: z.string(),
+          label: z.string(),
+          vendor: z.string(),
+          type: z.string(),
+          system: z.boolean(),
+          compatible: z.boolean(),
+        })
+        .strict(),
+    ),
+    dirty: z.boolean(),
   })
   .strict();
 const bedTypeResultSchema = projectResultSchema
@@ -1710,6 +1747,8 @@ export function createAgentCommands(dependencies: AgentToolDependencies) {
     plate_delete: defineCommand(toolSchemas.plate_delete, plateResultSchema, (params) => bridgeTool(dependencies, "plate_delete", params, plateResultSchema)),
     plate_lock: defineCommand(toolSchemas.plate_lock, plateResultSchema, (params) => bridgeTool(dependencies, "plate_lock", params, plateResultSchema)),
     printer_get: defineCommand(toolSchemas.printer_get, printerResultSchema, (params) => bridgeTool(dependencies, "printer_get", params, printerResultSchema)),
+    filaments_get: defineCommand(toolSchemas.filaments_get, filamentsResultSchema, (params) => bridgeTool(dependencies, "filaments_get", params, filamentsResultSchema)),
+    filament_color_set: defineCommand(toolSchemas.filament_color_set, projectResultSchema, (params) => bridgeTool(dependencies, "filament_color_set", params, projectResultSchema)),
     bed_type_set: defineCommand(toolSchemas.bed_type_set, bedTypeResultSchema, (params) => bridgeTool(dependencies, "bed_type_set", params, bedTypeResultSchema)),
     plate_move_to_front: defineCommand(toolSchemas.plate_move_to_front, plateResultSchema, (params) => bridgeTool(dependencies, "plate_move_to_front", params, plateResultSchema)),
     scene_render: defineCommand(toolSchemas.scene_render, mcpRenderResultSchema, (params) => sceneRender(dependencies, params)),

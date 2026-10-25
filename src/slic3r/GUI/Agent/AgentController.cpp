@@ -237,6 +237,14 @@ std::vector<InstanceTarget> require_instance_targets(const nlohmann::json& param
     return result;
 }
 
+/** A solid color in Orca's #RRGGBB form. */
+bool is_hex_color(const std::string& color)
+{
+    return color.size() == 7 && color[0] == '#' &&
+           std::all_of(color.begin() + 1, color.end(),
+                       [](unsigned char character) { return std::isxdigit(character) != 0; });
+}
+
 /** An object name: 1 to 255 bytes without control characters. */
 bool is_object_name(const std::string& name)
 {
@@ -247,22 +255,27 @@ bool is_object_name(const std::string& name)
     });
 }
 
+/** A required non-negative integer parameter; JSON may encode it signed. */
+std::size_t require_index(const nlohmann::json& params, const std::string& key)
+{
+    if (!params.contains(key))
+        throw AgentError(ErrorCode::InvalidRequest, key + " is required");
+    const auto& value = params.at(key);
+    const bool unsigned_value = value.is_number_unsigned();
+    const bool signed_value = value.is_number_integer() && !unsigned_value &&
+                              value.get<std::int64_t>() >= 0;
+    if (!unsigned_value && !signed_value)
+        throw AgentError(ErrorCode::InvalidRequest, key + " must be an unsigned integer");
+    const std::uint64_t raw = unsigned_value ?
+        value.get<std::uint64_t>() : static_cast<std::uint64_t>(value.get<std::int64_t>());
+    if (raw > std::numeric_limits<std::size_t>::max())
+        throw AgentError(ErrorCode::InvalidRequest, key + " is too large");
+    return static_cast<std::size_t>(raw);
+}
+
 std::size_t require_plate_index(const nlohmann::json& params)
 {
-    if (!params.contains("plate_index"))
-        throw AgentError(ErrorCode::InvalidRequest, "plate_index is required");
-    const auto& plate_value = params.at("plate_index");
-    const bool unsigned_value = plate_value.is_number_unsigned();
-    const bool signed_value = plate_value.is_number_integer() && !unsigned_value &&
-                              plate_value.get<std::int64_t>() >= 0;
-    if (!unsigned_value && !signed_value)
-        throw AgentError(ErrorCode::InvalidRequest, "plate_index must be an unsigned integer");
-    const std::uint64_t raw_plate = unsigned_value ?
-        plate_value.get<std::uint64_t>() :
-        static_cast<std::uint64_t>(plate_value.get<std::int64_t>());
-    if (raw_plate > std::numeric_limits<std::size_t>::max())
-        throw AgentError(ErrorCode::InvalidRequest, "plate_index is too large");
-    return static_cast<std::size_t>(raw_plate);
+    return require_index(params, "plate_index");
 }
 
 } // namespace
@@ -372,6 +385,10 @@ nlohmann::json AgentController::handle_prepared(const PreparedRequest& prepared)
             return edit_objects(request.method, request.params);
         if (request.method == "bed_type_set")
             return set_bed_type(request.params);
+        if (request.method == "filaments_get")
+            return get_filaments(request.params);
+        if (request.method == "filament_color_set")
+            return set_filament_color(request.params);
         if (request.method == "scene_render")
             return render_scene(request.params);
         if (request.method == "toolpath_render")
@@ -718,6 +735,7 @@ nlohmann::json AgentController::status() const
                           "plate_arrange", "plate_rename", "plate_delete", "plate_lock",
                           "plate_move_to_front", "printer_get", "bed_type_set",
                           "object_delete", "object_mirror", "object_rename",
+                          "filaments_get", "filament_color_set",
                           "scene_render",
                           "toolpath_render",
                           "desktop_capture", "preset_control", "settings_control",
@@ -995,6 +1013,35 @@ nlohmann::json AgentController::get_printer(const nlohmann::json& params) const
     result["project_id"] = *m_project_id;
     result["revision"] = m_revision;
     return result;
+}
+
+nlohmann::json AgentController::get_filaments(const nlohmann::json& params) const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    require_active_project(params);
+    nlohmann::json result = m_facade->filament_state();
+    result["project_id"] = *m_project_id;
+    result["revision"] = m_revision;
+    return result;
+}
+
+nlohmann::json AgentController::set_filament_color(const nlohmann::json& params)
+{
+    if (!params.contains("expected_revision"))
+        throw AgentError(ErrorCode::InvalidRequest, "expected_revision is required");
+    const std::size_t index = require_index(params, "index");
+    if (!params.contains("color") || !params["color"].is_string() ||
+        !is_hex_color(params["color"].get<std::string>()))
+        throw AgentError(ErrorCode::InvalidRequest, "color must be #RRGGBB");
+    std::lock_guard<std::mutex> lock(m_mutex);
+    require_active_project(params);
+    require_no_active_mutation("Cannot change filament colors while a mutating job is active");
+    std::string color = params["color"].get<std::string>();
+    std::transform(color.begin(), color.end(), color.begin(),
+                   [](unsigned char character) { return char(std::toupper(character)); });
+    m_facade->set_filament_color(index, color);
+    ++m_revision;
+    return {{"project_id", *m_project_id}, {"revision", m_revision}};
 }
 
 nlohmann::json AgentController::set_bed_type(const nlohmann::json& params)

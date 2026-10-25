@@ -32,6 +32,7 @@ const MUTATIONS = new Set([
   "plate_lock",
   "plate_move_to_front",
   "bed_type_set",
+  "filament_color_set",
   "presets_select",
   "settings_apply",
 ]);
@@ -39,6 +40,7 @@ const ALLOWED_COMMANDS = new Set([
   ...MUTATIONS,
   "scene_get",
   "printer_get",
+  "filaments_get",
   "presets_list",
   "settings_get",
   "settings_describe",

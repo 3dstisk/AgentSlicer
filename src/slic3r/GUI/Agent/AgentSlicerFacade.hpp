@@ -76,6 +76,10 @@ public:
     virtual nlohmann::json printer_state() const = 0;
     /** Applies `curr_bed_type` like Orca's bed type combo; `bed_type` is an enum value. */
     virtual void set_bed_type(const std::string& bed_type) = 0;
+    /** Orca's sidebar filament section: slots with preset and color, and the presets. */
+    virtual nlohmann::json filament_state() const = 0;
+    /** Sets one slot's solid color (#RRGGBB) like Orca's filament color picker. */
+    virtual void set_filament_color(std::size_t index, const std::string& color) = 0;
     virtual nlohmann::json settings_describe(const nlohmann::json& request) const = 0;
     virtual nlohmann::json settings_get(const nlohmann::json& request) const = 0;
     virtual nlohmann::json settings_apply(const nlohmann::json& request) = 0;

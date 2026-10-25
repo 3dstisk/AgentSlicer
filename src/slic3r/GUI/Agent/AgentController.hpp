@@ -112,6 +112,8 @@ private:
     /** object_delete, object_mirror and object_rename. */
     nlohmann::json edit_objects(const std::string& method, const nlohmann::json& params);
     nlohmann::json set_bed_type(const nlohmann::json& params);
+    nlohmann::json get_filaments(const nlohmann::json& params) const;
+    nlohmann::json set_filament_color(const nlohmann::json& params);
     nlohmann::json render_scene(const nlohmann::json& params);
     nlohmann::json render_toolpaths(const nlohmann::json& params);
     nlohmann::json desktop_capture(const nlohmann::json& params) const;
