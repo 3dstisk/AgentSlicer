@@ -395,6 +395,10 @@ nlohmann::json AgentController::handle_prepared(const PreparedRequest& prepared)
             return edit_plate(request.method, request.params);
         if (request.method == "printer_get")
             return get_printer(request.params);
+        if (request.method == "printer_catalog_get")
+            return get_printer_catalog(request.params);
+        if (request.method == "printer_model_install")
+            return install_printer_model(request.params);
         if (request.method == "object_delete" || request.method == "object_mirror" ||
             request.method == "object_rename" || request.method == "object_filament_set")
             return edit_objects(request.method, request.params);
@@ -757,6 +761,7 @@ nlohmann::json AgentController::status() const
                           "object_transform", "object_auto_orient", "scene_arrange", "plate_add",
                           "plate_arrange", "plate_rename", "plate_delete", "plate_lock",
                           "plate_move_to_front", "printer_get", "bed_type_set",
+                          "printer_catalog_get", "printer_model_install",
                           "object_delete", "object_mirror", "object_rename",
                           "filaments_get", "filament_color_set", "filament_add", "filament_delete",
                           "object_filament_set",
@@ -1153,6 +1158,37 @@ nlohmann::json AgentController::edit_filament_slots(const std::string& method,
     else
         m_facade->delete_filament(index);
     ++m_revision;
+    result["revision"] = m_revision;
+    return result;
+}
+
+nlohmann::json AgentController::get_printer_catalog(const nlohmann::json& params) const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    require_active_project(params);
+    nlohmann::json result = m_facade->printer_catalog();
+    result["project_id"] = *m_project_id;
+    result["revision"] = m_revision;
+    return result;
+}
+
+nlohmann::json AgentController::install_printer_model(const nlohmann::json& params)
+{
+    if (!params.contains("expected_revision"))
+        throw AgentError(ErrorCode::InvalidRequest, "expected_revision is required");
+    for (const char* key : {"vendor_id", "model", "variant"})
+        if (!params.contains(key) || !params[key].is_string() || params[key].get<std::string>().empty())
+            throw AgentError(ErrorCode::InvalidRequest, std::string(key) + " must be a non-empty string");
+    if (params.contains("discard_dirty") && !params["discard_dirty"].is_boolean())
+        throw AgentError(ErrorCode::InvalidRequest, "discard_dirty must be a boolean");
+    std::lock_guard<std::mutex> lock(m_mutex);
+    require_active_project(params);
+    require_no_active_mutation("Cannot install a printer while a mutating job is active");
+    nlohmann::json result = m_facade->install_printer_model(
+        params["vendor_id"].get<std::string>(), params["model"].get<std::string>(),
+        params["variant"].get<std::string>(), params.value("discard_dirty", false));
+    ++m_revision;
+    result["project_id"] = *m_project_id;
     result["revision"] = m_revision;
     return result;
 }

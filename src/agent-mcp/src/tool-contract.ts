@@ -387,6 +387,19 @@ export const toolSchemas = {
     .object({ ...projectWithRevision, plate_index: unsignedSafeInteger })
     .strict(),
   printer_get: z.object(projectSnapshot).strict(),
+  printer_catalog_get: z.object(projectSnapshot).strict(),
+  printer_model_install: z
+    .object({
+      ...projectWithRevision,
+      vendor_id: z.string().min(1).max(128).describe("vendor_id from printer_catalog_get"),
+      model: z.string().min(1).max(256).describe("Printer model from printer_catalog_get"),
+      variant: z.string().min(1).max(32).describe("Nozzle variant such as 0.4"),
+      discard_dirty: z
+        .boolean()
+        .default(false)
+        .describe("Deliberately discard unsaved preset edits; installing reloads Orca's presets"),
+    })
+    .strict(),
   filaments_get: z.object(projectSnapshot).strict(),
   process_get: z.object(projectSnapshot).strict(),
   object_settings_get: z
@@ -619,6 +632,8 @@ export const toolNames = [
   "plate_lock",
   "plate_move_to_front",
   "printer_get",
+  "printer_catalog_get",
+  "printer_model_install",
   "bed_type_set",
   "filaments_get",
   "filament_color_set",
@@ -687,6 +702,10 @@ const descriptions: Record<ToolName, string> = {
     "Remove one zero-based plate like Orca's plate icon. Its instances move off the plates; the last plate cannot be removed.",
   plate_lock: "Lock or unlock one zero-based plate. Arrange and auto-orient skip locked plates.",
   plate_move_to_front: "Move one zero-based plate to index 0 together with its instances, like Orca's plate icon.",
+  printer_catalog_get:
+    "List every FFF printer model Orca ships profiles for, grouped by vendor (vendor_id, display name), with nozzle variants, whether the model is installed and its cover image path.",
+  printer_model_install:
+    "Install one printer model and nozzle variant like Orca's Add printers wizard (installing the vendor profiles when needed), reload Orca's presets and select that printer. Returns the selected printer preset. discard_dirty must be explicit when presets have unsaved edits.",
   printer_get:
     "Read Orca's sidebar printer section: the selected printer preset, model and nozzle variant, whether presets have unsaved edits, visible system printer models with their variant presets and cover image path, user printer presets, and the bed type with the types the printer supports (null when Orca hides the bed type).",
   filaments_get:
@@ -839,6 +858,30 @@ const processResultSchema = z
   })
   .strict();
 const filamentAddResultSchema = projectResultSchema.extend({ index: unsignedSafeInteger }).strict();
+const printerCatalogResultSchema = projectResultSchema
+  .extend({
+    vendors: z.array(
+      z
+        .object({
+          vendor_id: z.string(),
+          name: z.string(),
+          models: z.array(
+            z
+              .object({
+                model: z.string(),
+                name: z.string(),
+                variants: z.array(z.string()),
+                installed: z.boolean(),
+                cover: z.string().nullable(),
+              })
+              .strict(),
+          ),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+const printerInstallResultSchema = projectResultSchema.extend({ preset: z.string() }).strict();
 const bedTypeResultSchema = projectResultSchema
   .extend({ bed_type: z.string() })
   .strict();
@@ -1906,6 +1949,8 @@ export function createAgentCommands(dependencies: AgentToolDependencies) {
     plate_delete: defineCommand(toolSchemas.plate_delete, plateResultSchema, (params) => bridgeTool(dependencies, "plate_delete", params, plateResultSchema)),
     plate_lock: defineCommand(toolSchemas.plate_lock, plateResultSchema, (params) => bridgeTool(dependencies, "plate_lock", params, plateResultSchema)),
     printer_get: defineCommand(toolSchemas.printer_get, printerResultSchema, (params) => bridgeTool(dependencies, "printer_get", params, printerResultSchema)),
+    printer_catalog_get: defineCommand(toolSchemas.printer_catalog_get, printerCatalogResultSchema, (params) => bridgeTool(dependencies, "printer_catalog_get", params, printerCatalogResultSchema)),
+    printer_model_install: defineCommand(toolSchemas.printer_model_install, printerInstallResultSchema, (params) => bridgeTool(dependencies, "printer_model_install", params, printerInstallResultSchema)),
     filaments_get: defineCommand(toolSchemas.filaments_get, filamentsResultSchema, (params) => bridgeTool(dependencies, "filaments_get", params, filamentsResultSchema)),
     process_get: defineCommand(toolSchemas.process_get, processResultSchema, (params) => bridgeTool(dependencies, "process_get", params, processResultSchema)),
     object_settings_get: defineCommand(toolSchemas.object_settings_get, objectSettingsResultSchema, (params) => bridgeTool(dependencies, "object_settings_get", params, objectSettingsResultSchema)),

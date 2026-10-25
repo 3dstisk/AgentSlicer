@@ -58,6 +58,8 @@ The v1 tool list and order are fixed:
 | `plate_lock` | Set a plate's `locked` state; arrange and auto-orient skip locked plates. |
 | `plate_move_to_front` | Move a plate and its instances to index 0. |
 | `printer_get` | Read the sidebar printer section: selected printer preset, model and variant; unsaved-edit state; visible system models with variant presets and cover image path; user printer presets; and the bed type with supported types (`null` when Orca hides it). Cover and bed image paths are served read-only at `GET /api/v1/sessions/<id>/resources/<path>`. |
+| `printer_catalog_get` | List every FFF printer Orca ships profiles for, grouped by vendor, with nozzle variants, install state and cover image path. |
+| `printer_model_install` | Install one model and nozzle variant like Orca's Add printers wizard (vendor profiles installed when needed), reload presets and select it; returns the selected preset. Requires `discard_dirty` with unsaved edits. |
 | `filaments_get` | Read filament slots (preset and `#RRGGBB` color per zero-based slot), visible filament presets with vendor, type, origin and compatibility, and the unsaved-edit state. Change slot presets with `presets_select` `filaments` (one name per slot). |
 | `filament_color_set` | Set one slot's solid `#RRGGBB` color like Orca's color picker. |
 | `filament_add` | Add a slot like Orca's add filament button (last slot's preset, next palette color) and return its zero-based `index`. |

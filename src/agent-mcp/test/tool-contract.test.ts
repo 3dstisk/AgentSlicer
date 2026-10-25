@@ -29,6 +29,8 @@ describe("MCP tool schemas", () => {
       "plate_lock",
       "plate_move_to_front",
       "printer_get",
+      "printer_catalog_get",
+      "printer_model_install",
       "bed_type_set",
       "filaments_get",
       "filament_color_set",
@@ -102,6 +104,11 @@ describe("MCP tool schemas", () => {
       expect(toolSchemas.filament_color_set.safeParse({ ...base, color }).success).toBe(false);
     expect(toolSchemas.filaments_get.safeParse({ project_id: "project_1" }).success).toBe(true);
     expect(toolSchemas.process_get.safeParse({ project_id: "project_1" }).success).toBe(true);
+    expect(toolSchemas.printer_catalog_get.safeParse({ project_id: "project_1" }).success).toBe(true);
+    const install = { project_id: "project_1", expected_revision: 2, vendor_id: "Elegoo", model: "Elegoo OrangeStorm Giga", variant: "0.4" };
+    expect(toolSchemas.printer_model_install.safeParse(install).success).toBe(true);
+    expect(toolSchemas.printer_model_install.safeParse({ ...install, variant: "" }).success).toBe(false);
+    expect(toolSchemas.printer_model_install.safeParse({ ...install, expected_revision: undefined }).success).toBe(false);
     expect(toolSchemas.process_get.safeParse({ project_id: "project_1", mode: "advanced" }).success).toBe(false);
     const objects = { project_id: "project_1", object_ids: ["object_1", "object_2"] };
     expect(toolSchemas.object_settings_get.safeParse(objects).success).toBe(true);

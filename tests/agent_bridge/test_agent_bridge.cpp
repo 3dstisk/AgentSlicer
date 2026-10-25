@@ -161,6 +161,21 @@ public:
         --plate_count;
     }
     nlohmann::json printer_state() const override { return printer; }
+    nlohmann::json printer_catalog() const override
+    {
+        return {{"vendors", {{{"vendor_id", "Elegoo"}, {"name", "Elegoo"},
+                              {"models", {{{"model", "Elegoo OrangeStorm Giga"},
+                                           {"name", "Elegoo OrangeStorm Giga"},
+                                           {"variants", {"0.4", "0.6"}}, {"installed", false},
+                                           {"cover", nullptr}}}}}}}};
+    }
+    nlohmann::json install_printer_model(const std::string& vendor_id, const std::string& model_id,
+                                         const std::string& variant, bool discard_dirty) override
+    {
+        installed_printer = {{"vendor_id", vendor_id}, {"model", model_id}, {"variant", variant},
+                             {"discard_dirty", discard_dirty}};
+        return {{"preset", model_id + " " + variant + " nozzle"}};
+    }
     nlohmann::json filament_state() const override
     {
         return {{"slots", {{{"index", 0}, {"preset", "Generic PLA"}, {"label", "Generic PLA"},
@@ -451,6 +466,7 @@ public:
     std::string filament_color = "#F2754E";
     std::vector<nlohmann::json> object_settings_calls;
     std::size_t filament_slots = 1;
+    nlohmann::json installed_printer;
     std::vector<InstanceTarget> mirrored;
     int mirror_axis {-1};
     std::pair<std::string, std::string> renamed;
@@ -1447,6 +1463,30 @@ TEST_CASE("Object settings read per object and overrides advance the revision", 
                                          {{"project_id", project["project_id"]},
                                           {"object_ids", {"object_1"}},
                                           {"reset_keys", {"wall_loops"}}}}),
+                      AgentError);
+}
+
+TEST_CASE("Printer catalog reads and model installs advance the revision", "[AgentBridge]")
+{
+    auto facade = std::make_shared<FakeFacade>();
+    AgentController controller(facade);
+    const auto project = controller.handle({"create", "project_create", {}});
+    const auto catalog = controller.handle(
+        {"catalog", "printer_catalog_get", {{"project_id", project["project_id"]}}});
+    REQUIRE(catalog["vendors"][0]["models"][0]["model"] == "Elegoo OrangeStorm Giga");
+    REQUIRE(catalog["revision"] == project["revision"]);
+    const auto installed = controller.handle(
+        {"install", "printer_model_install",
+         {{"project_id", project["project_id"]}, {"expected_revision", project["revision"]},
+          {"vendor_id", "Elegoo"}, {"model", "Elegoo OrangeStorm Giga"}, {"variant", "0.4"},
+          {"discard_dirty", true}}});
+    REQUIRE(installed["preset"] == "Elegoo OrangeStorm Giga 0.4 nozzle");
+    REQUIRE(installed["revision"] == project["revision"].get<int>() + 1);
+    REQUIRE(facade->installed_printer["discard_dirty"] == true);
+    REQUIRE_THROWS_AS(controller.handle({"missing", "printer_model_install",
+                                         {{"project_id", project["project_id"]},
+                                          {"expected_revision", installed["revision"]},
+                                          {"vendor_id", "Elegoo"}, {"model", ""}, {"variant", "0.4"}}}),
                       AgentError);
 }
 

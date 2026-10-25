@@ -81,6 +81,12 @@ public:
     virtual nlohmann::json presets_select(const nlohmann::json& request) = 0;
     /** Orca's sidebar printer section: models, variants, user presets and bed types. */
     virtual nlohmann::json printer_state() const = 0;
+    // Every FFF printer model in Orca's resources, grouped by vendor.
+    virtual nlohmann::json printer_catalog() const = 0;
+    // Orca's Add printers wizard for one model: installs the vendor profiles
+    // when needed, enables the model variant and selects it.
+    virtual nlohmann::json install_printer_model(const std::string& vendor_id, const std::string& model_id,
+                                                 const std::string& variant, bool discard_dirty) = 0;
     /** Applies `curr_bed_type` like Orca's bed type combo; `bed_type` is an enum value. */
     virtual void set_bed_type(const std::string& bed_type) = 0;
     /** Orca's sidebar filament section: slots with preset and color, and the presets. */

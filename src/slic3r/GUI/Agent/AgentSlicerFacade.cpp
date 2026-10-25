@@ -18,6 +18,7 @@
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/GUI/ConfigManipulation.hpp"
 #include "slic3r/GUI/Tab.hpp"
+#include "slic3r/Utils/PresetUpdater.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/GCode/Thumbnails.hpp"
@@ -1750,6 +1751,97 @@ public:
                            selected_filaments);
         }
         return {{"selected", selected}, {"presets", std::move(presets)}};
+    }
+
+    // Every printer model Orca ships profiles for, read once from resources
+    // like the Add printers wizard (vendor index files only, no presets).
+    static const PresetBundle& printer_catalog_bundle()
+    {
+        static const std::unique_ptr<PresetBundle> catalog = [] {
+            auto bundle = std::make_unique<PresetBundle>();
+            bundle->load_system_models_from_json(ForwardCompatibilitySubstitutionRule::EnableSilent);
+            return bundle;
+        }();
+        return *catalog;
+    }
+
+    static std::string vendor_display_name(const VendorProfile& vendor)
+    {
+        // Orca's wizard shows the BBL bundle ("Bambulab") as Bambu Lab.
+        return vendor.id == "BBL" ? "Bambu Lab" : vendor.name;
+    }
+
+    nlohmann::json printer_catalog() const override
+    {
+        assert_gui_thread();
+        const AppConfig& app = *wxGetApp().app_config;
+        nlohmann::json vendors = nlohmann::json::array();
+        for (const auto& [id, vendor] : printer_catalog_bundle().vendors) {
+            nlohmann::json models = nlohmann::json::array();
+            for (const VendorProfile::PrinterModel& model : vendor.models) {
+                if (model.technology != ptFFF)
+                    continue;
+                nlohmann::json variants = nlohmann::json::array();
+                bool installed = false;
+                for (const VendorProfile::PrinterVariant& variant : model.variants) {
+                    variants.push_back(variant.name);
+                    installed = installed || app.get_variant(id, model.id, variant.name);
+                }
+                const std::string cover = "profiles/" + id + "/" + model.id + "_cover.png";
+                models.push_back({
+                    {"model", model.id}, {"name", model.name}, {"variants", std::move(variants)},
+                    {"installed", installed},
+                    {"cover", boost::filesystem::exists(boost::filesystem::path(resources_dir()) / cover) ?
+                                  nlohmann::json(cover) : nlohmann::json(nullptr)}
+                });
+            }
+            if (!models.empty())
+                vendors.push_back({{"vendor_id", id}, {"name", vendor_display_name(vendor)},
+                                   {"models", std::move(models)}});
+        }
+        return {{"vendors", std::move(vendors)}};
+    }
+
+    nlohmann::json install_printer_model(const std::string& vendor_id, const std::string& model_id,
+                                         const std::string& variant, bool discard_dirty) override
+    {
+        assert_gui_thread();
+        const PresetBundle& catalog = printer_catalog_bundle();
+        const auto vendor = catalog.vendors.find(vendor_id);
+        if (vendor == catalog.vendors.end())
+            throw AgentError(ErrorCode::InvalidRequest, "Printer vendor does not exist",
+                             {{"vendor_id", vendor_id}});
+        const auto model = std::find_if(vendor->second.models.begin(), vendor->second.models.end(),
+                                        [&](const auto& entry) { return entry.id == model_id; });
+        if (model == vendor->second.models.end() || model->technology != ptFFF ||
+            std::none_of(model->variants.begin(), model->variants.end(),
+                         [&](const auto& entry) { return entry.name == variant; }))
+            throw AgentError(ErrorCode::InvalidRequest, "Printer model or nozzle variant does not exist",
+                             {{"model", model_id}, {"variant", variant}});
+        PresetBundle& bundle = *wxGetApp().preset_bundle;
+        if (presets_are_dirty(bundle) && !discard_dirty)
+            require_clean_presets(bundle);
+
+        // Same steps as Orca's ConfigWizard::priv::apply_config for one model.
+        const boost::filesystem::path installed =
+            boost::filesystem::path(data_dir()) / PRESET_SYSTEM_DIR / (vendor_id + ".json");
+        if (!boost::filesystem::exists(installed) &&
+            !wxGetApp().get_preset_updater()->install_bundles_rsrc({vendor_id}, false))
+            throw AgentError(ErrorCode::InternalError, "Orca could not install the printer profiles",
+                             {{"vendor_id", vendor_id}});
+        AppConfig& app = *wxGetApp().app_config;
+        app.set_variant(vendor_id, model_id, variant, true);
+        app.save();
+        bundle.load_presets(app, ForwardCompatibilitySubstitutionRule::EnableSilentDisableSystem,
+                            {model_id, variant, "", ""});
+        wxGetApp().load_current_presets(false, false);
+
+        const Preset& selected = bundle.printers.get_selected_preset();
+        if (!selected.config.has("printer_model") ||
+            selected.config.opt_string("printer_model") != model_id)
+            throw AgentError(ErrorCode::InternalError, "Orca did not select the installed printer",
+                             {{"model", model_id}, {"selected", selected.name}});
+        return {{"preset", selected.name}};
     }
 
     nlohmann::json presets_select(const nlohmann::json& request) override
