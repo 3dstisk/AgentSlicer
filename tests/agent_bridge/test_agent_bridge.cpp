@@ -159,6 +159,13 @@ public:
             throw AgentError(ErrorCode::InvalidRequest, "The last plate cannot be removed");
         --plate_count;
     }
+    nlohmann::json printer_state() const override { return printer; }
+    void set_bed_type(const std::string& bed_type) override
+    {
+        if (bed_type != "Textured PEI Plate" && bed_type != "Cool Plate")
+            throw AgentError(ErrorCode::InvalidRequest, "The selected printer does not support this bed type");
+        printer["bed"]["type"] = bed_type;
+    }
     void lock_plate(std::size_t plate_index, bool locked) override
     {
         require_fake_plate(plate_index);
@@ -377,6 +384,13 @@ public:
     std::map<std::size_t, std::string> plate_names;
     std::set<std::size_t> locked_plates;
     std::optional<std::size_t> front_plate;
+    mutable nlohmann::json printer = {
+        {"selected", {{"preset", "Bambu Lab A1 0.4 nozzle"}, {"model", "Bambu Lab A1"},
+                      {"variant", "0.4"}, {"system", true}}},
+        {"dirty", false},
+        {"models", nlohmann::json::array()},
+        {"user_presets", nlohmann::json::array()},
+        {"bed", {{"type", "Cool Plate"}, {"types", nlohmann::json::array()}}}};
     bool slice_started {false};
     std::optional<std::size_t> last_plate_index;
     FacadeJobState next_slice_state;
@@ -1272,6 +1286,39 @@ TEST_CASE("Instance components round-trip mirrored and plain matrices", "[AgentB
     REQUIRE(instance_components(affine(sheared)).skewed);
 }
 
+TEST_CASE("Printer state reads without a revision and bed type changes advance it", "[AgentBridge]")
+{
+    auto facade = std::make_shared<FakeFacade>();
+    AgentController controller(facade);
+    const auto project = controller.handle({"create", "project_create", {}});
+    const auto printer = controller.handle(
+        {"printer", "printer_get", {{"project_id", project["project_id"]}}});
+    REQUIRE(printer["selected"]["model"] == "Bambu Lab A1");
+    REQUIRE(printer["revision"] == project["revision"]);
+
+    const auto changed = controller.handle(
+        {"bed", "bed_type_set", {{"project_id", project["project_id"]},
+                                 {"expected_revision", project["revision"]},
+                                 {"bed_type", "Textured PEI Plate"}}});
+    REQUIRE(changed["revision"] == project["revision"].get<int>() + 1);
+    REQUIRE(facade->printer["bed"]["type"] == "Textured PEI Plate");
+    REQUIRE_THROWS_AS(
+        controller.handle({"bad", "bed_type_set", {{"project_id", project["project_id"]},
+                                                  {"expected_revision", changed["revision"]},
+                                                  {"bed_type", "Glass"}}}),
+        AgentError);
+    REQUIRE_THROWS_AS(
+        controller.handle({"type", "bed_type_set", {{"project_id", project["project_id"]},
+                                                   {"expected_revision", changed["revision"]},
+                                                   {"bed_type", 3}}}),
+        AgentError);
+    REQUIRE_THROWS_AS(
+        controller.handle({"stale", "bed_type_set", {{"project_id", project["project_id"]},
+                                                    {"expected_revision", project["revision"]},
+                                                    {"bed_type", "Cool Plate"}}}),
+        AgentError);
+}
+
 TEST_CASE("Plate edits validate plates and advance the revision", "[AgentBridge]")
 {
     auto facade = std::make_shared<FakeFacade>();
@@ -1351,6 +1398,8 @@ TEST_CASE("Every native scene mutator requires an expected revision", "[AgentBri
         {"arrange", "scene_arrange", {{"project_id", project["project_id"]}}});
     requires_revision(
         {"plate", "plate_add", {{"project_id", project["project_id"]}}});
+    requires_revision({"bed", "bed_type_set",
+                       {{"project_id", project["project_id"]}, {"bed_type", "Cool Plate"}}});
     for (const char* method : {"plate_rename", "plate_delete", "plate_lock",
                                "plate_move_to_front"})
         requires_revision({"plate", method,

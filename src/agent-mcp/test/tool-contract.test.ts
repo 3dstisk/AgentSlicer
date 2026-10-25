@@ -24,6 +24,8 @@ describe("MCP tool schemas", () => {
       "plate_delete",
       "plate_lock",
       "plate_move_to_front",
+      "printer_get",
+      "bed_type_set",
       "scene_render",
       "toolpath_render",
       "desktop_capture",
@@ -76,6 +78,14 @@ describe("MCP tool schemas", () => {
     expect(toolSchemas.model_import.safeParse({ ...base, name: "dir/a.stl" }).success).toBe(false);
     expect(toolSchemas.model_import.safeParse({ ...base, name: "a\\b.stl" }).success).toBe(false);
     expect(toolSchemas.model_import.safeParse({ ...base, name: "" }).success).toBe(false);
+  });
+
+  it("requires a revision and a bed type key to set the bed type", () => {
+    const base = { project_id: "project_1", expected_revision: 2 };
+    expect(toolSchemas.bed_type_set.safeParse({ ...base, bed_type: "Textured PEI Plate" }).success).toBe(true);
+    expect(toolSchemas.bed_type_set.safeParse({ project_id: "project_1", bed_type: "Cool Plate" }).success).toBe(false);
+    expect(toolSchemas.bed_type_set.safeParse({ ...base, bed_type: "" }).success).toBe(false);
+    expect(toolSchemas.printer_get.safeParse({ project_id: "project_1" }).success).toBe(true);
   });
 
   it("accepts only root-level supported upload filenames and strong checksums", () => {

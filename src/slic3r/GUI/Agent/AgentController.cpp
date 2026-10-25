@@ -329,6 +329,10 @@ nlohmann::json AgentController::handle_prepared(const PreparedRequest& prepared)
         if (request.method == "plate_rename" || request.method == "plate_delete" ||
             request.method == "plate_lock" || request.method == "plate_move_to_front")
             return edit_plate(request.method, request.params);
+        if (request.method == "printer_get")
+            return get_printer(request.params);
+        if (request.method == "bed_type_set")
+            return set_bed_type(request.params);
         if (request.method == "scene_render")
             return render_scene(request.params);
         if (request.method == "toolpath_render")
@@ -673,7 +677,7 @@ nlohmann::json AgentController::status() const
         {"capabilities", {"project_foundation", "model_import", "scene_inspection",
                           "object_transform", "object_auto_orient", "scene_arrange", "plate_add",
                           "plate_arrange", "plate_rename", "plate_delete", "plate_lock",
-                          "plate_move_to_front",
+                          "plate_move_to_front", "printer_get", "bed_type_set",
                           "scene_render",
                           "toolpath_render",
                           "desktop_capture", "preset_control", "settings_control",
@@ -920,6 +924,31 @@ nlohmann::json AgentController::edit_plate(const std::string& method,
     ++m_revision;
     return {{"project_id", *m_project_id}, {"revision", m_revision},
             {"plate_index", plate_index}};
+}
+
+nlohmann::json AgentController::get_printer(const nlohmann::json& params) const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    require_active_project(params);
+    nlohmann::json result = m_facade->printer_state();
+    result["project_id"] = *m_project_id;
+    result["revision"] = m_revision;
+    return result;
+}
+
+nlohmann::json AgentController::set_bed_type(const nlohmann::json& params)
+{
+    if (!params.contains("expected_revision"))
+        throw AgentError(ErrorCode::InvalidRequest, "expected_revision is required");
+    if (!params.contains("bed_type") || !params["bed_type"].is_string())
+        throw AgentError(ErrorCode::InvalidRequest, "bed_type must be a string");
+    std::lock_guard<std::mutex> lock(m_mutex);
+    require_active_project(params);
+    require_no_active_mutation("Cannot change the bed type while a mutating job is active");
+    const std::string bed_type = params["bed_type"].get<std::string>();
+    m_facade->set_bed_type(bed_type);
+    ++m_revision;
+    return {{"project_id", *m_project_id}, {"revision", m_revision}, {"bed_type", bed_type}};
 }
 
 nlohmann::json AgentController::arrange_scene(const nlohmann::json& params)

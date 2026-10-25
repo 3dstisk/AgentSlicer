@@ -62,6 +62,10 @@ public:
         std::size_t plate_index) = 0;
     virtual nlohmann::json presets_list(const nlohmann::json& request) const = 0;
     virtual nlohmann::json presets_select(const nlohmann::json& request) = 0;
+    /** Orca's sidebar printer section: models, variants, user presets and bed types. */
+    virtual nlohmann::json printer_state() const = 0;
+    /** Applies `curr_bed_type` like Orca's bed type combo; `bed_type` is an enum value. */
+    virtual void set_bed_type(const std::string& bed_type) = 0;
     virtual nlohmann::json settings_describe(const nlohmann::json& request) const = 0;
     virtual nlohmann::json settings_get(const nlohmann::json& request) const = 0;
     virtual nlohmann::json settings_apply(const nlohmann::json& request) = 0;

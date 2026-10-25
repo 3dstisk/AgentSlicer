@@ -6,6 +6,7 @@ import { actorSchema, SessionError, sessionIdSchema } from "./session-store.js";
 import type { SessionManager } from "./session-manager.js";
 import { readGeometryManifest } from "./scene-geometry.js";
 import { logApiFailure } from "./diagnostics.js";
+import { openOrcaResource } from "./orca-resources.js";
 
 function json(response: ServerResponse, status: number, value: unknown): void {
   response.writeHead(status, {
@@ -275,6 +276,30 @@ export function createSessionHttp(manager: SessionManager) {
           } finally {
             await artifact.handle.close();
           }
+        }
+        if (request.method === "GET" && action.startsWith("resources/")) {
+          await manager.read(id, token);
+          let relative: string;
+          try {
+            relative = decodeURIComponent(action.slice("resources/".length));
+          } catch {
+            throw new SessionError("resource_not_found", "Resource not found", 404);
+          }
+          const resource = await openOrcaResource(relative);
+          try {
+            response.writeHead(200, {
+              "content-type": "image/png",
+              "content-length": resource.bytes,
+              "cache-control": "private, max-age=86400",
+            });
+            await pipeline(
+              resource.handle.createReadStream({ autoClose: false }),
+              response,
+            );
+          } finally {
+            await resource.handle.close();
+          }
+          return;
         }
         if (request.method === "GET" && action === "events") {
           await manager.read(id, token);

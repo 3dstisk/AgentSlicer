@@ -53,11 +53,13 @@ The v1 tool list and order are fixed:
 | `plate_delete` | Remove a plate like Orca's plate icon; its instances move off the plates. The last plate cannot be removed. |
 | `plate_lock` | Set a plate's `locked` state; arrange and auto-orient skip locked plates. |
 | `plate_move_to_front` | Move a plate and its instances to index 0. |
+| `printer_get` | Read the sidebar printer section: selected printer preset, model and variant; unsaved-edit state; visible system models with variant presets and cover image path; user printer presets; and the bed type with supported types (`null` when Orca hides it). Cover and bed image paths are served read-only at `GET /api/v1/sessions/<id>/resources/<path>`. |
+| `bed_type_set` | Set the project bed type to a supported `printer_get` key, like Orca's bed type selector. |
 | `scene_render` | Render 1–6 unique views: `iso`, `top`, `front`, `rear`, `left`, `right`, `bottom`, or `top_front`; dimensions are 64–2048 pixels. |
 | `toolpath_render` | Render 1–6 line-type-colored views of a successful slice, optionally limited to an inclusive zero-based layer range. |
 | `desktop_capture` | Capture the full Orca desktop for diagnostics, including dialogs. |
 | `presets_list` | List exact printer/process/filament names, selection, and compatibility. |
-| `presets_select` | Atomically select exact names; filament names are ordered by extruder. |
+| `presets_select` | Atomically select exact names; filament names are ordered by extruder.. Selecting only a printer keeps compatible process and filament presets and replaces incompatible ones like Orca. |
 | `settings_describe` | Discover paginated setting descriptors by scope/query. |
 | `settings_get` | Read typed values for exact setting keys. |
 | `settings_apply` | Atomically validate/apply typed changes; `dry_run: true` validates without mutation. |

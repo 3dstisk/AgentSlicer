@@ -21,6 +21,7 @@
 #include "libslic3r/miniz_extension.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/Utils.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1523,9 +1524,20 @@ public:
         const auto& selection = request.at("selection");
         const nlohmann::json before = selected_presets(live);
 
-        if (selection.contains("printer"))
+        if (selection.contains("printer")) {
             select_exact(candidate.printers, selection.at("printer").get<std::string>(), "printer");
-        candidate.update_compatible(PresetSelectCompatibleType::Never);
+            // Like Orca's printer combo: keep compatible process and filament
+            // presets and replace incompatible ones unless they were requested.
+            candidate.update_compatible(
+                selection.contains("process") ? PresetSelectCompatibleType::Never :
+                                                PresetSelectCompatibleType::Always,
+                selection.contains("filaments") ? PresetSelectCompatibleType::Never :
+                                                  PresetSelectCompatibleType::Always);
+            if (!selection.contains("filaments"))
+                candidate.update_multi_material_filament_presets();
+        } else {
+            candidate.update_compatible(PresetSelectCompatibleType::Never);
+        }
 
         PresetCollection& process = process_presets(candidate);
         if (selection.contains("process"))
@@ -1568,6 +1580,132 @@ public:
         wxGetApp().load_current_presets(false, false);
         const nlohmann::json selected = selected_presets(live);
         return {{"selected", selected}, {"changed", had_dirty || selected != before}};
+    }
+
+    nlohmann::json printer_state() const override
+    {
+        assert_gui_thread();
+        PresetBundle& bundle = *wxGetApp().preset_bundle;
+        const Preset& selected = bundle.printers.get_selected_preset();
+        const auto model_of = [](const Preset& preset) {
+            return preset.config.has("printer_model") ? preset.config.opt_string("printer_model") :
+                                                        std::string();
+        };
+        const auto variant_of = [](const Preset& preset) {
+            return preset.config.has("printer_variant") ?
+                preset.config.opt_string("printer_variant") : std::string();
+        };
+        const boost::filesystem::path resources(resources_dir());
+        const auto resource = [&resources](const std::string& relative) {
+            return boost::filesystem::exists(resources / relative) ? nlohmann::json(relative) :
+                                                                   nlohmann::json(nullptr);
+        };
+
+        // System presets grouped by model like Orca's printer combo; user and
+        // project presets are listed by name.
+        nlohmann::json models = nlohmann::json::array();
+        nlohmann::json user_presets = nlohmann::json::array();
+        std::map<std::string, std::size_t> model_index;
+        for (const Preset& preset : bundle.printers.get_presets()) {
+            if (preset.is_default || (!preset.is_visible && &preset != &selected))
+                continue;
+            const std::string model = model_of(preset);
+            if (!preset.is_system) {
+                user_presets.push_back({{"preset", preset.name}, {"model", model},
+                                        {"variant", variant_of(preset)}});
+                continue;
+            }
+            if (model.empty())
+                continue;
+            const auto [entry, inserted] = model_index.emplace(model, models.size());
+            if (inserted) {
+                const std::string vendor_id = preset.vendor != nullptr ? preset.vendor->id : "";
+                models.push_back({
+                    {"model", model},
+                    {"vendor", preset.vendor != nullptr ? preset.vendor->name : ""},
+                    {"cover", vendor_id.empty() ? nlohmann::json(nullptr) :
+                                                  resource("profiles/" + vendor_id + "/" + model + "_cover.png")},
+                    {"variants", nlohmann::json::array()}
+                });
+            }
+            models[entry->second]["variants"].push_back(
+                {{"variant", variant_of(preset)}, {"preset", preset.name}});
+        }
+
+        // Orca shows the bed type picker for Bambu printers or when the printer
+        // supports several bed types, without the model's unsupported types.
+        nlohmann::json bed = nullptr;
+        const bool multi_bed = selected.config.has("support_multi_bed_types") &&
+                               selected.config.opt_bool("support_multi_bed_types");
+        if (bundle.is_bbl_vendor() || multi_bed) {
+            const ConfigOptionDef* def = print_config_def.get("curr_bed_type");
+            const VendorProfile::PrinterModel* printer_model = PresetUtils::system_printer_model(selected);
+            if (printer_model == nullptr)
+                if (const Preset* parent = bundle.printers.get_selected_preset_parent())
+                    printer_model = PresetUtils::system_printer_model(*parent);
+            static const std::array<const char*, 6> thumbnails {
+                "bed_cool", "bed_engineering", "bed_high_templ", "bed_pei", "bed_pei_cool",
+                "bed_cool_supertack"};
+            nlohmann::json types = nlohmann::json::array();
+            for (std::size_t index = 0; index < def->enum_values.size(); ++index) {
+                const std::string& label = def->enum_labels[index];
+                if (printer_model != nullptr &&
+                    std::find(printer_model->not_support_bed_types.begin(),
+                              printer_model->not_support_bed_types.end(), label) !=
+                        printer_model->not_support_bed_types.end())
+                    continue;
+                types.push_back({
+                    {"key", def->enum_values[index]},
+                    {"label", label},
+                    {"image", index < thumbnails.size() ?
+                                  resource(std::string("images/") + thumbnails[index] + ".png") :
+                                  nlohmann::json(nullptr)}
+                });
+            }
+            const int current = int(bundle.project_config.opt_enum<BedType>("curr_bed_type"));
+            bed = {{"type", current >= 1 && current <= int(def->enum_values.size()) ?
+                                nlohmann::json(def->enum_values[current - 1]) : nlohmann::json(nullptr)},
+                   {"types", std::move(types)}};
+        }
+
+        return {
+            {"selected", {{"preset", selected.name}, {"model", model_of(selected)},
+                          {"variant", variant_of(selected)}, {"system", selected.is_system}}},
+            {"dirty", presets_are_dirty(bundle)},
+            {"models", std::move(models)},
+            {"user_presets", std::move(user_presets)},
+            {"bed", std::move(bed)}
+        };
+    }
+
+    void set_bed_type(const std::string& bed_type) override
+    {
+        assert_gui_thread();
+        const nlohmann::json bed = printer_state().at("bed");
+        if (bed.is_null())
+            throw AgentError(ErrorCode::InvalidRequest, "The selected printer has a single bed type");
+        const auto& types = bed.at("types");
+        if (std::none_of(types.begin(), types.end(),
+                         [&](const nlohmann::json& type) { return type.at("key") == bed_type; }))
+            throw AgentError(ErrorCode::InvalidRequest, "The selected printer does not support this bed type",
+                             {{"bed_type", bed_type}});
+        const ConfigOptionDef* def = print_config_def.get("curr_bed_type");
+        const BedType value = BedType(def->enum_keys_map->at(bed_type));
+        PresetBundle& bundle = *wxGetApp().preset_bundle;
+        if (bundle.project_config.opt_enum<BedType>("curr_bed_type") == value)
+            return;
+        // Same steps as Orca's bed type combo (Plater::priv::on_select_bed_type).
+        bundle.project_config.set_key_value("curr_bed_type", new ConfigOptionEnum<BedType>(value));
+        m_plater.update_project_dirty_from_presets();
+        m_plater.on_config_change(bundle.full_config());
+        AppConfig* app_config = wxGetApp().app_config;
+        app_config->set("curr_bed_type", std::to_string(int(value)));
+        app_config->set_printer_setting(bundle.printers.get_selected_preset_name(),
+                                        "curr_bed_type", std::to_string(int(value)));
+        for (PartPlate* plate : m_plater.get_partplate_list().get_plate_list())
+            if (plate->get_bed_type() == btDefault)
+                plate->update_slice_result_valid_state(false);
+        m_plater.on_bed_type_change(value);
     }
 
     nlohmann::json settings_describe(const nlohmann::json& request) const override
