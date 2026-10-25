@@ -13,6 +13,7 @@ describe("MCP tool schemas", () => {
       "slicer_status",
       "upload_prepare",
       "project_create",
+      "scene_export",
       "model_import",
       "scene_get",
       "object_transform",

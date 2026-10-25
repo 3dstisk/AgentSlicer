@@ -1,3 +1,4 @@
+#include "Agent/AgentPlateUpdateContext.hpp"
 #include <array>
 #include <cassert>
 #include <cmath>
@@ -6528,7 +6529,7 @@ int PartPlateList::notify_instance_update(int obj_id, int instance_id, bool is_n
 			plate->add_instance(obj_id, instance_id, false, &boundingbox);
 
 			// spiral mode, update object setting
-			if (plate->config()->has("spiral_mode") && plate->config()->opt_bool("spiral_mode") && !is_object_config_compatible_with_spiral_vase(object)) {
+			if (!Agent::geometry_only_plate_update() && plate->config()->has("spiral_mode") && plate->config()->opt_bool("spiral_mode") && !is_object_config_compatible_with_spiral_vase(object)) {
 				if (!is_new) {
 					auto answer = static_cast<TabPrintPlate*>(wxGetApp().plate_tab)->show_spiral_mode_settings_dialog(true);
 					if (answer == wxID_YES) {

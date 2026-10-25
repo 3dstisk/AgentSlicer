@@ -11,6 +11,8 @@ import { BridgeError } from "../src/bridge-client.js";
 import type { AgentMcpConfig } from "../src/config.js";
 import { readInternalPng, unlinkInternalPng } from "../src/images.js";
 import { createAgentHttpServer, type AgentHttpServer } from "../src/server.js";
+import { NativeSessionEngine } from "../src/session-engine.js";
+import { UploadManager } from "../src/uploads.js";
 import { toolNames, type ToolDependencies } from "../src/tool-contract.js";
 import { pngFixture } from "./png-fixture.js";
 
@@ -63,6 +65,7 @@ async function startMcp(options: {
   renderPaths: string[];
   workspaceRoot: string;
   outputRoot: string;
+  dependencies: ToolDependencies;
 }> {
   const directory = await mkdtemp(join(tmpdir(), "agent-mcp-http-"));
   const renderRoot = join(directory, "mcp");
@@ -375,7 +378,7 @@ async function startMcp(options: {
     async () => http.close(),
     () => rm(directory, { recursive: true, force: true }),
   );
-  return { client, calls, endpoint, renderPaths, workspaceRoot, outputRoot };
+  return { client, calls, endpoint, renderPaths, workspaceRoot, outputRoot, dependencies };
 }
 
 async function rawRequest(
@@ -2475,5 +2478,94 @@ describe("Streamable HTTP MCP server", () => {
         authorization: "Bearer deployment-secret",
       }),
     ).not.toBe(401);
+  });
+});
+
+describe("editor HTTP API", () => {
+  it("keeps full checkpoint restore private while allowing the verified session engine to dispatch it", async () => {
+    const { endpoint, client, calls, dependencies, workspaceRoot } = await startMcp({ bridgeCall: (method) => {
+      if (method !== "project_restore") throw new Error(`Unexpected bridge method: ${method}`);
+      return { project_id: "restored-project", revision: 2 };
+    } });
+    expect((await client.listTools()).tools.map((tool) => tool.name)).not.toContain("project_restore");
+    await expect(client.callTool({ name: "project_restore", arguments: { path: "/workspace/verified.3mf", expected_revision: 1 } })).rejects.toThrow();
+    const capabilities = await (await fetch(new URL("/api/v1/capabilities", endpoint))).json();
+    expect(capabilities.commands).not.toHaveProperty("project_restore");
+    const rejected = await fetch(new URL("/api/v1/commands/project_restore", endpoint), {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: "/workspace/verified.3mf", expected_revision: 1 }),
+    });
+    expect(rejected.status).toBe(404); await rejected.body?.cancel();
+    expect(calls).toEqual([]);
+    const engine = new NativeSessionEngine({ ...dependencies, uploads: new UploadManager(workspaceRoot, 1024, 10000) }, 1000);
+    expect(await engine.restore("/workspace/verified.3mf", 1)).toEqual({ project_id: "restored-project", revision: 2 });
+    expect(calls).toEqual([["project_restore", { path: "/workspace/verified.3mf", expected_revision: 1 }]]);
+  });
+  it("advertises the shared command inputs and requires authentication", async () => {
+    const { endpoint } = await startMcp({ bearerToken: "editor-test-token" });
+    const url = new URL("/api/v1/capabilities", endpoint);
+    expect((await fetch(url)).status).toBe(401);
+    const response = await fetch(url, { headers: { authorization: "Bearer editor-test-token" } });
+    expect(response.status).toBe(200);
+    const body = await response.json();
+    expect(Object.keys(body.commands)).toEqual([...toolNames]);
+    expect(body.session_model).toBe("one_active_project_per_worker");
+    expect(body.commands.object_transform.input.properties.expected_revision).toBeDefined();
+    const exportResponse = await fetch(new URL("/api/v1/commands/gcode_3mf_export", endpoint), {
+      method: "POST", headers: { authorization: "Bearer editor-test-token", "content-type": "application/json" }, body: "{}",
+    });
+    expect(exportResponse.status).toBe(400);
+  });
+
+  it("returns the same validated result through HTTP and MCP", async () => {
+    const { endpoint, client } = await startMcp();
+    const mcp = await client.callTool({ name: "slicer_status", arguments: {} });
+    const response = await fetch(new URL("/api/v1/commands/slicer_status", endpoint), {
+      method: "POST", headers: { "content-type": "application/json" }, body: "{}",
+    });
+    expect(response.status).toBe(200);
+    expect((await response.json()).structuredContent).toEqual(mcp.structuredContent);
+  });
+
+  it("validates before dispatch and preserves native revision conflicts", async () => {
+    const { endpoint, calls } = await startMcp({ bridgeCall: (method) => {
+      if (method === "object_transform") throw new BridgeError({ code: "revision_conflict", message: "Stale revision", details: { actual_revision: 3 } });
+      return {};
+    } });
+    const url = new URL("/api/v1/commands/object_transform", endpoint);
+    const headers = { "content-type": "application/json" };
+    const invalid = await fetch(url, { method: "POST", headers, body: JSON.stringify({ project_id: "project-1" }) });
+    expect(invalid.status).toBe(400);
+    expect(calls).toEqual([]);
+    const conflict = await fetch(url, { method: "POST", headers, body: JSON.stringify({
+      project_id: "project-1", expected_revision: 1, object_id: "object-1", instance_id: "instance-1", position_mm: { x: 1, y: 2, z: 3 },
+    }) });
+    expect(conflict.status).toBe(409);
+    expect((await conflict.json()).structuredContent.error).toMatchObject({ code: "revision_conflict", details: { actual_revision: 3 } });
+    expect(calls[0]?.[1].offset_mm).toEqual([1, 2, 3]);
+  });
+
+  it("sends fresh snapshots after reconnect and closes streams on shutdown", async () => {
+    const { endpoint } = await startMcp();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const response = await fetch(new URL("/api/v1/events", endpoint));
+      expect(response.headers.get("content-type")).toBe("text/event-stream");
+      const reader = response.body!.getReader();
+      let data = "";
+      while (!data.includes("event: snapshot")) {
+        const chunk = await reader.read();
+        expect(chunk.done).toBe(false);
+        data += new TextDecoder().decode(chunk.value);
+      }
+      expect(data).toContain('"protocol_version":2');
+      await reader.cancel();
+    }
+  });
+
+  it("rejects non-JSON requests, unknown commands and foreign origins", async () => {
+    const { endpoint } = await startMcp();
+    const url = new URL("/api/v1/commands/project_create", endpoint);
+    expect((await fetch(url, { method: "POST", body: "{}" })).status).toBe(415);
+    expect((await fetch(new URL("/api/v1/commands/missing", endpoint), { method: "POST" })).status).toBe(404);
+    expect((await fetch(url, { method: "POST", headers: { origin: "https://evil.example", "content-type": "application/json" }, body: "{}" })).status).toBe(403);
   });
 });

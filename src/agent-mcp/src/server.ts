@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server as HttpServer, type ServerResponse } from "node:http";
 import { createHash, timingSafeEqual } from "node:crypto";
+import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
 
 import { hostHeaderValidation, originValidation, toNodeHandler } from "@modelcontextprotocol/node";
@@ -18,6 +19,12 @@ import {
 } from "./tool-contract.js";
 import { isUploadId, UploadError, UploadManager } from "./uploads.js";
 import { OutputManager } from "./outputs.js";
+import { createEditorApi } from "./http-api.js";
+import { logApiFailure } from "./diagnostics.js";
+import { SessionManager } from "./session-manager.js";
+import { NativeSessionEngine } from "./session-engine.js";
+import { createSessionHttp } from "./session-http.js";
+import { SessionError } from "./session-store.js";
 
 export function createAgentMcpServer(dependencies: AgentToolDependencies): McpServer {
   const server = new McpServer({
@@ -136,7 +143,18 @@ export function createAgentHttpServer(
     config.uploadTtlMs,
   );
   const outputs = new OutputManager(config.outputRoot);
-  const handler = createAgentMcpHandler({ ...dependencies, uploads });
+  const sessions = new SessionManager({
+    root: config.sessionRoot ?? join(config.workspaceRoot, ".editor-sessions"),
+    workspaceRoot: config.workspaceRoot, outputRoot: config.outputRoot,
+    maxBytes: config.maxUploadBytes, maxStorageBytes: config.sessionMaxBytes, uploadTtlMs: config.uploadTtlMs,
+    leaseTtlMs: config.sessionLeaseTtlMs ?? 30 * 60 * 1000,
+    engine: new NativeSessionEngine({ ...dependencies, uploads }, config.sessionLeaseTtlMs ?? 30 * 60 * 1000),
+  });
+  const guarded = { ...dependencies, bridge: { call: (method: string, params?: Record<string, unknown>) =>
+    sessions.legacy(method, () => dependencies.bridge.call(method, params)) } };
+  const handler = createAgentMcpHandler({ ...guarded, uploads });
+  const editor = createEditorApi({ ...guarded, uploads });
+  const sessionHttp = createSessionHttp(sessions);
   const mcp = toNodeHandler(handler);
   const validateHost = hostHeaderValidation([...config.allowedHosts]);
   const validateOrigin = originValidation([...config.allowedOrigins]);
@@ -181,6 +199,7 @@ export function createAgentHttpServer(
         ? outputFilename(path)
         : undefined;
       if (
+        !path.startsWith("/api/v1/") &&
         path !== "/mcp" &&
         (uploadId === undefined || !isUploadId(uploadId)) &&
         !isOutputIndex &&
@@ -196,6 +215,15 @@ export function createAgentHttpServer(
         sendJson(response, 401, { error: "unauthorized" });
         return;
       }
+      if (path === "/api/v1/sessions" || path.startsWith("/api/v1/sessions/")) {
+        await sessionHttp.handle(request, response);
+        return;
+      }
+      if (path.startsWith("/api/v1/")) {
+        await editor.handle(request, response);
+        return;
+      }
+      if (isOutputIndex || requestedOutput !== undefined || uploadId !== undefined) await sessions.guardLegacyFiles();
       if (isOutputIndex) {
         if (request.method !== "GET" && request.method !== "HEAD") {
           response.setHeader("allow", "GET, HEAD");
@@ -262,9 +290,10 @@ export function createAgentHttpServer(
       }
       await mcp(request, response);
     })().catch((error: unknown) => {
+      logApiFailure("http.request", error);
       if (!response.headersSent) {
-        sendJson(response, 500, {
-          error: error instanceof Error ? error.message : "internal_server_error",
+        sendJson(response, error instanceof SessionError ? error.status : 500, {
+          error: error instanceof SessionError ? { code: error.code, message: error.message } : error instanceof Error ? error.message : "internal_server_error",
         });
       } else {
         response.end();
@@ -275,6 +304,9 @@ export function createAgentHttpServer(
   return {
     server,
     async close(): Promise<void> {
+      editor.close();
+      sessionHttp.close();
+      await sessions.close();
       await handler.close();
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));

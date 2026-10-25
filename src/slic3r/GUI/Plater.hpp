@@ -467,6 +467,7 @@ public:
     // Agent-only GUI commit for geometry parsed by a worker. This deliberately
     // bypasses all modal import policy dialogs and never loads configuration.
     std::vector<size_t> load_model_for_agent(const Model& imported);
+    void restore_project_for_agent(const boost::filesystem::path& path);
     // to be called on drag and drop
     bool load_files(const wxArrayString& filenames);
 

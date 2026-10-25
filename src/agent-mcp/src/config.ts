@@ -17,6 +17,9 @@ export interface AgentMcpConfig {
   allowedHosts: readonly string[];
   allowedOrigins: readonly string[];
   bearerToken?: string;
+  sessionRoot?: string;
+  sessionLeaseTtlMs?: number;
+  sessionMaxBytes?: number;
 }
 
 function isLoopbackHost(host: string): boolean {
@@ -87,6 +90,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AgentMcpConfig
       16 * 1024 * 1024,
       "AGENT_SLICER_MAX_IMAGE_BYTES",
     ),
+    sessionRoot: absolutePath(env.AGENT_SLICER_SESSION_ROOT ?? "/config/editor-sessions", "AGENT_SLICER_SESSION_ROOT"),
+    sessionMaxBytes: positiveInteger(env.AGENT_SLICER_SESSION_MAX_BYTES, 2 * 1024 * 1024 * 1024, "AGENT_SLICER_SESSION_MAX_BYTES"),
+    sessionLeaseTtlMs: positiveInteger(env.AGENT_SLICER_POOL_LEASE_TTL_MS, 30 * 60 * 1000, "AGENT_SLICER_POOL_LEASE_TTL_MS"),
     workspaceRoot: "/workspace",
     outputRoot: "/outputs",
     maxUploadBytes: positiveInteger(

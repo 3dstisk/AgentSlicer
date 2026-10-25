@@ -95,6 +95,8 @@ private:
 
     nlohmann::json status() const;
     nlohmann::json create_project();
+    nlohmann::json restore_project(const nlohmann::json& params, std::shared_ptr<TemporaryFile> snapshot);
+    nlohmann::json start_scene_export(const nlohmann::json& params);
     nlohmann::json get_project(const nlohmann::json& params) const;
     nlohmann::json import_model(const nlohmann::json& params,
                                 std::shared_ptr<TemporaryFile> snapshot,

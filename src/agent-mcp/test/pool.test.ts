@@ -943,3 +943,38 @@ describe("pool configuration", () => {
     })).toThrow("AGENT_SLICER_POOL_ID");
   });
 });
+
+
+describe("editor lease routing", () => {
+  it("proxies versioned commands only with a worker lease", async () => {
+    const observed: string[] = [];
+    const backend = createServer((request, response) => {
+      observed.push(`${request.url} ${request.headers.authorization}`);
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ api_version: 1 }));
+    });
+    servers.push(backend);
+    const backendPort = await listen(backend);
+    const provisioner = new FakeProvisioner();
+    provisioner.backendUrl = new URL(`http://127.0.0.1:${backendPort}`);
+    const pool = new WarmWorkerPool(provisioner, { size: 1, leaseTtlMs: 60_000, maxQueue: 1 });
+    pools.push(pool);
+    await pool.start();
+    const config = poolConfig();
+    const gateway = createAgentPoolHttpServer(config, pool);
+    poolServers.push(gateway);
+    const gatewayPort = await listen(gateway.server);
+    const origin = `http://127.0.0.1:${gatewayPort}`;
+    expect((await fetch(`${origin}/api/v1/capabilities`)).status).toBe(401);
+    const lease = await pool.acquire(0);
+    const response = await fetch(`${origin}/api/v1/capabilities`, {
+      headers: { authorization: `Bearer ${lease.token}` },
+    });
+    expect(response.status).toBe(200);
+    expect(observed).toEqual(["/api/v1/capabilities Bearer backend-worker-1"]);
+    await pool.release(lease.token, lease.leaseId);
+    expect((await fetch(`${origin}/api/v1/capabilities`, {
+      headers: { authorization: `Bearer ${lease.token}` },
+    })).status).toBe(401);
+  });
+});

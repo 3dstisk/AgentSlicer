@@ -16,6 +16,15 @@ For concurrent agents, use the disposable-worker architecture in
 [the warm container pool guide](../../docs/container-pool.md); never share one
 Orca container between independent agents.
 
+For the operator web editor, use the [HTTP command API](../../docs/HLSD/editor-http-api.md)
+and [durable session/geometry contract](../../docs/HLSD/editor-sessions-and-geometry.md).
+The Node adapter requires Node 24 or later. Durable sessions require a native
+build advertising `project_restore` and `scene_export`; adapter discovery alone
+does not establish native availability. Mount `/config` persistently for its
+SQLite records, capability key and native checkpoints. Editor workers become
+dedicated after first claim and reject unscoped project/file operations; keep
+ordinary MCP batch work on separate workers. This is not a pool migration API.
+
 The native source uses OrcaSlicer `v2.5.0-alpha`, a prerelease, with AgentSlicer's
 custom commits merged on top. Keep `origin` pointing to `3dstisk/AgentSlicer` and
 add the official repository as `upstream` in a new clone:

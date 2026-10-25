@@ -4,6 +4,7 @@ import { McpServer, type CallToolResult } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
 import { BridgeError } from "./bridge-client.js";
+import { logApiFailure } from "./diagnostics.js";
 import { readInternalPng, readPngBuffer, unlinkInternalPng } from "./images.js";
 import type { BridgeCaller, DesktopCaptureAdapter } from "./types.js";
 import {
@@ -184,7 +185,7 @@ const scale3 = z
   .strict();
 const unsignedSafeInteger = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 
-type OutputExtension = ".gcode" | ".gcode.3mf" | ".3mf";
+type OutputExtension = ".gcode" | ".gcode.3mf" | ".3mf" | ".scene.bin";
 
 function outputPath(extension: OutputExtension) {
   return z
@@ -267,6 +268,8 @@ export const toolSchemas = {
     })
     .strict(),
   project_create: z.object({}).strict(),
+  project_restore: z.object({ path: z.string().startsWith("/workspace/").endsWith(".3mf"), expected_revision: revision }).strict(),
+  scene_export: z.object({ ...projectWithRevision, output_path: outputPath(".scene.bin"), overwrite: z.boolean().default(false) }).strict(),
   model_import: z
     .object({
       ...projectWithRevision,
@@ -487,6 +490,7 @@ export const toolNames = [
   "slicer_status",
   "upload_prepare",
   "project_create",
+  "scene_export",
   "model_import",
   "scene_get",
   "object_transform",
@@ -509,7 +513,7 @@ export const toolNames = [
 ] as const;
 
 type ToolName = (typeof toolNames)[number];
-type BridgeToolName = Exclude<ToolName, "upload_prepare">;
+type BridgeToolName = Exclude<ToolName, "upload_prepare"> | "project_restore";
 
 export interface ToolDependencies {
   bridge: BridgeCaller;
@@ -526,6 +530,7 @@ export interface AgentToolDependencies extends ToolDependencies {
 }
 
 const descriptions: Record<ToolName, string> = {
+  scene_export: "Export a revision-bound native scene manifest and binary mesh buffers.",
   slicer_status: "Report native Orca bridge readiness, active project, revision, jobs, and capabilities.",
   upload_prepare:
     "Create a single-use authenticated HTTP upload ticket for a local STL, OBJ, 3MF, STEP, or STP file. PUT the raw bytes to the returned same-origin upload_path, then pass workspace_path to model_import. Detailed guidance is available at agentslicer://docs/upload.",
@@ -1090,6 +1095,10 @@ const projectSaveJobSchema = z
       });
     }
   });
+const sceneExportJobSchema = z.object({ ...jobBase, type: z.literal("scene_export"),
+  metadata: z.object({ output_path: outputPath(".scene.bin") }).strict(),
+  result: z.object({ path: artifactPath(".scene.bin"), bytes: z.number().int().nonnegative() }).strict().nullable(),
+}).strict();
 export const jobResultSchema = z.discriminatedUnion("type", [
   arrangeJobSchema,
   autoOrientJobSchema,
@@ -1098,6 +1107,7 @@ export const jobResultSchema = z.discriminatedUnion("type", [
   gcodeExportJobSchema,
   gcode3mfExportJobSchema,
   projectSaveJobSchema,
+  sceneExportJobSchema,
 ]);
 
 function objectResult(value: unknown): Record<string, unknown> {
@@ -1213,6 +1223,7 @@ async function bridgeTool(
     const result = await dependencies.bridge.call(method, toBridgeParams(method, params));
     return successResult(resultSchema.parse(result));
   } catch (error) {
+    logApiFailure(`command.${method}`, error);
     return toolErrorResult(error);
   }
 }
@@ -1538,221 +1549,74 @@ async function desktopCapture(
   }
 }
 
-export function registerAgentTools(server: McpServer, dependencies: AgentToolDependencies): void {
-  server.registerTool(
-    "slicer_status",
-    {
-      description: descriptions.slicer_status,
-      inputSchema: toolSchemas.slicer_status,
-      outputSchema: statusResultSchema,
-    },
-    () => bridgeTool(dependencies, "slicer_status", {}, statusResultSchema),
-  );
-  server.registerTool(
-    "upload_prepare",
-    {
-      description: descriptions.upload_prepare,
-      inputSchema: toolSchemas.upload_prepare,
-      outputSchema: uploadPreparationResultSchema,
-    },
-    async (params) => {
+// Both transports execute these operations, including upload and render handling.
+function defineCommand<Input extends z.ZodType>(
+  inputSchema: Input,
+  outputSchema: z.ZodType,
+  execute: (params: z.output<Input>) => Promise<CallToolResult>,
+) {
+  return { inputSchema, outputSchema, execute: (params: unknown) => execute(inputSchema.parse(params)) };
+}
+
+export function createAgentCommands(dependencies: AgentToolDependencies) {
+  return {
+    slicer_status: defineCommand(toolSchemas.slicer_status, statusResultSchema, () => bridgeTool(dependencies, "slicer_status", {}, statusResultSchema)),
+    upload_prepare: defineCommand(toolSchemas.upload_prepare, uploadPreparationResultSchema, async (params) => {
       try {
         const prepared = await dependencies.uploads.prepare(params);
         return successResult(uploadPreparationResultSchema.parse(prepared));
       } catch (error) {
         return toolErrorResult(error);
       }
-    },
-  );
-  server.registerTool(
-    "project_create",
-    {
-      description: descriptions.project_create,
-      inputSchema: toolSchemas.project_create,
-      outputSchema: projectResultSchema,
-    },
-    () => bridgeTool(dependencies, "project_create", {}, projectResultSchema),
-  );
-  server.registerTool(
-    "model_import",
-    {
-      description: descriptions.model_import,
-      inputSchema: toolSchemas.model_import,
-      outputSchema: registeredJobStartResultSchema,
-    },
-    (params) => bridgeTool(dependencies, "model_import", params, registeredJobStartResultSchema),
-  );
-  server.registerTool(
-    "scene_get",
-    {
-      description: descriptions.scene_get,
-      inputSchema: toolSchemas.scene_get,
-      outputSchema: sceneResultSchema,
-    },
-    (params) => bridgeTool(dependencies, "scene_get", params, sceneResultSchema),
-  );
-  server.registerTool(
-    "object_transform",
-    {
-      description: descriptions.object_transform,
-      inputSchema: toolSchemas.object_transform,
-      outputSchema: projectResultSchema,
-    },
-    (params) => bridgeTool(dependencies, "object_transform", params, projectResultSchema),
-  );
-  server.registerTool(
-    "object_auto_orient",
-    {
-      description: descriptions.object_auto_orient,
-      inputSchema: toolSchemas.object_auto_orient,
-      outputSchema: runningJobStartResultSchema,
-    },
-    (params) => bridgeTool(
+    }),
+    project_create: defineCommand(toolSchemas.project_create, projectResultSchema, () => bridgeTool(dependencies, "project_create", {}, projectResultSchema)),
+    project_restore: defineCommand(toolSchemas.project_restore, projectResultSchema, (params) => bridgeTool(dependencies, "project_restore", params, projectResultSchema)),
+    scene_export: defineCommand(toolSchemas.scene_export, runningJobStartResultSchema, (params) => bridgeTool(dependencies, "scene_export", params, runningJobStartResultSchema)),
+    model_import: defineCommand(toolSchemas.model_import, registeredJobStartResultSchema, (params) => bridgeTool(dependencies, "model_import", params, registeredJobStartResultSchema)),
+    scene_get: defineCommand(toolSchemas.scene_get, sceneResultSchema, (params) => bridgeTool(dependencies, "scene_get", params, sceneResultSchema)),
+    object_transform: defineCommand(toolSchemas.object_transform, projectResultSchema, (params) => bridgeTool(dependencies, "object_transform", params, projectResultSchema)),
+    object_auto_orient: defineCommand(toolSchemas.object_auto_orient, runningJobStartResultSchema, (params) => bridgeTool(
       dependencies,
       "object_auto_orient",
       params,
       runningJobStartResultSchema,
-    ),
-  );
-  server.registerTool(
-    "scene_arrange",
-    {
-      description: descriptions.scene_arrange,
-      inputSchema: toolSchemas.scene_arrange,
-      outputSchema: runningJobStartResultSchema,
-    },
-    (params) => bridgeTool(dependencies, "scene_arrange", params, runningJobStartResultSchema),
-  );
-  server.registerTool(
-    "scene_render",
-    {
-      description: descriptions.scene_render,
-      inputSchema: toolSchemas.scene_render,
-      outputSchema: mcpRenderResultSchema,
-    },
-    (params) => sceneRender(dependencies, params),
-  );
-  server.registerTool(
-    "toolpath_render",
-    {
-      description: descriptions.toolpath_render,
-      inputSchema: toolSchemas.toolpath_render,
-      outputSchema: mcpToolpathRenderResultSchema,
-    },
-    (params) => toolpathRender(dependencies, params),
-  );
-  server.registerTool(
-    "desktop_capture",
-    {
-      description: descriptions.desktop_capture,
-      inputSchema: toolSchemas.desktop_capture,
-      outputSchema: desktopResultSchema,
-    },
-    (params) => desktopCapture(dependencies, params),
-  );
-  server.registerTool(
-    "presets_list",
-    {
-      description: descriptions.presets_list,
-      inputSchema: toolSchemas.presets_list,
-      outputSchema: presetsListResultSchema,
-    },
-    (params) => bridgeTool(dependencies, "presets_list", params, presetsListResultSchema),
-  );
-  server.registerTool(
-    "presets_select",
-    {
-      description: descriptions.presets_select,
-      inputSchema: toolSchemas.presets_select,
-      outputSchema: presetsSelectResultSchema,
-    },
-    (params) => bridgeTool(dependencies, "presets_select", params, presetsSelectResultSchema),
-  );
-  server.registerTool(
-    "settings_describe",
-    {
-      description: descriptions.settings_describe,
-      inputSchema: toolSchemas.settings_describe,
-      outputSchema: settingsDescribeResultSchema,
-    },
-    (params) =>
-      bridgeTool(dependencies, "settings_describe", params, settingsDescribeResultSchema),
-  );
-  server.registerTool(
-    "settings_get",
-    {
-      description: descriptions.settings_get,
-      inputSchema: toolSchemas.settings_get,
-      outputSchema: settingsGetResultSchema,
-    },
-    (params) => bridgeTool(dependencies, "settings_get", params, settingsGetResultSchema),
-  );
-  server.registerTool(
-    "settings_apply",
-    {
-      description: descriptions.settings_apply,
-      inputSchema: toolSchemas.settings_apply,
-      outputSchema: settingsApplyResultSchema,
-    },
-    (params) => bridgeTool(dependencies, "settings_apply", params, settingsApplyResultSchema),
-  );
-  server.registerTool(
-    "slice_start",
-    {
-      description: descriptions.slice_start,
-      inputSchema: toolSchemas.slice_start,
-      outputSchema: runningJobStartResultSchema,
-    },
-    (params) => bridgeTool(dependencies, "slice_start", params, runningJobStartResultSchema),
-  );
-  server.registerTool(
-    "job_get",
-    {
-      description: descriptions.job_get,
-      inputSchema: toolSchemas.job_get,
-      outputSchema: jobResultSchema,
-    },
-    (params) => bridgeTool(dependencies, "job_get", params, jobResultSchema),
-  );
-  server.registerTool(
-    "job_cancel",
-    {
-      description: descriptions.job_cancel,
-      inputSchema: toolSchemas.job_cancel,
-      outputSchema: jobResultSchema,
-    },
-    (params) => bridgeTool(dependencies, "job_cancel", params, jobResultSchema),
-  );
-  server.registerTool(
-    "gcode_export",
-    {
-      description: descriptions.gcode_export,
-      inputSchema: toolSchemas.gcode_export,
-      outputSchema: runningJobStartResultSchema,
-    },
-    (params) => bridgeTool(dependencies, "gcode_export", params, runningJobStartResultSchema),
-  );
-  server.registerTool(
-    "gcode_3mf_export",
-    {
-      description: descriptions.gcode_3mf_export,
-      inputSchema: toolSchemas.gcode_3mf_export,
-      outputSchema: runningJobStartResultSchema,
-    },
-    (params) => bridgeTool(
+    )),
+    scene_arrange: defineCommand(toolSchemas.scene_arrange, runningJobStartResultSchema, (params) => bridgeTool(dependencies, "scene_arrange", params, runningJobStartResultSchema)),
+    scene_render: defineCommand(toolSchemas.scene_render, mcpRenderResultSchema, (params) => sceneRender(dependencies, params)),
+    toolpath_render: defineCommand(toolSchemas.toolpath_render, mcpToolpathRenderResultSchema, (params) => toolpathRender(dependencies, params)),
+    desktop_capture: defineCommand(toolSchemas.desktop_capture, desktopResultSchema, (params) => desktopCapture(dependencies, params)),
+    presets_list: defineCommand(toolSchemas.presets_list, presetsListResultSchema, (params) => bridgeTool(dependencies, "presets_list", params, presetsListResultSchema)),
+    presets_select: defineCommand(toolSchemas.presets_select, presetsSelectResultSchema, (params) => bridgeTool(dependencies, "presets_select", params, presetsSelectResultSchema)),
+    settings_describe: defineCommand(toolSchemas.settings_describe, settingsDescribeResultSchema, (params) =>
+      bridgeTool(dependencies, "settings_describe", params, settingsDescribeResultSchema)),
+    settings_get: defineCommand(toolSchemas.settings_get, settingsGetResultSchema, (params) => bridgeTool(dependencies, "settings_get", params, settingsGetResultSchema)),
+    settings_apply: defineCommand(toolSchemas.settings_apply, settingsApplyResultSchema, (params) => bridgeTool(dependencies, "settings_apply", params, settingsApplyResultSchema)),
+    slice_start: defineCommand(toolSchemas.slice_start, runningJobStartResultSchema, (params) => bridgeTool(dependencies, "slice_start", params, runningJobStartResultSchema)),
+    job_get: defineCommand(toolSchemas.job_get, jobResultSchema, (params) => bridgeTool(dependencies, "job_get", params, jobResultSchema)),
+    job_cancel: defineCommand(toolSchemas.job_cancel, jobResultSchema, (params) => bridgeTool(dependencies, "job_cancel", params, jobResultSchema)),
+    gcode_export: defineCommand(toolSchemas.gcode_export, runningJobStartResultSchema, (params) => bridgeTool(dependencies, "gcode_export", params, runningJobStartResultSchema)),
+    gcode_3mf_export: defineCommand(toolSchemas.gcode_3mf_export, runningJobStartResultSchema, (params) => bridgeTool(
       dependencies,
       "gcode_3mf_export",
       params,
       runningJobStartResultSchema,
-    ),
-  );
-  server.registerTool(
-    "project_save",
-    {
-      description: descriptions.project_save,
-      inputSchema: toolSchemas.project_save,
-      outputSchema: registeredJobStartResultSchema,
-    },
-    (params) => bridgeTool(dependencies, "project_save", params, registeredJobStartResultSchema),
-  );
+    )),
+    project_save: defineCommand(toolSchemas.project_save, registeredJobStartResultSchema, (params) => bridgeTool(dependencies, "project_save", params, registeredJobStartResultSchema)),
+  };
+}
+
+export function createPublicAgentCommands(dependencies: AgentToolDependencies) {
+  const commands = createAgentCommands(dependencies);
+  // Full configuration restore belongs to the verified checkpoint service.
+  return Object.fromEntries(toolNames.map((name) => [name, commands[name]])) as Pick<typeof commands, ToolName>;
+}
+
+export function registerAgentTools(server: McpServer, dependencies: AgentToolDependencies): void {
+  for (const [name, command] of Object.entries(createPublicAgentCommands(dependencies))) {
+    server.registerTool(name, {
+      description: descriptions[name as ToolName],
+      inputSchema: command.inputSchema,
+      outputSchema: command.outputSchema,
+    }, (params: unknown) => command.execute(params));
+  }
 }

@@ -312,6 +312,8 @@ static const std::pair<unsigned int, unsigned int> THUMBNAIL_SIZE_3MF = { 512, 5
 namespace Slic3r {
 namespace GUI {
 
+static constexpr double MaxUnscaledObjectBedRatio = 10000.;
+
 // A textured mesh is only worth routing through the import dialog when it actually carries
 // decoded image data; UV-only meshes have nothing to sample.
 static bool has_importable_texture(const Slic3r::TexturedMesh& textured_mesh)
@@ -7429,7 +7431,7 @@ struct Plater::priv
                                    LoadStrategy strategy,
                                    bool ask_multi      = false,
                                    bool* published_out = nullptr,
-                                   bool* config_loaded_out = nullptr);
+                                   bool* config_loaded_out = nullptr, bool trusted_agent_restore = false);
     std::vector<size_t> load_model_objects(const ModelObjectPtrs& model_objects, bool allow_negative_z = false, bool split_object = false, bool auto_drop = true,
                                            bool suppress_policy_dialogs = false);
 
@@ -8991,7 +8993,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                              LoadStrategy strategy,
                                              bool ask_multi,
                                              bool* published_out,
-                                             bool* config_loaded_out)
+                                             bool* config_loaded_out, bool trusted_agent_restore)
 {
     if (config_loaded_out != nullptr)
         *config_loaded_out = false;
@@ -9130,6 +9132,9 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     PlateDataPtrs             plate_data;
                     ConfigSubstitutionContext config_substitutions{ForwardCompatibilitySubstitutionRule::Enable};
                     std::vector<Preset *>     project_presets;
+                    ScopeGuard project_presets_sc([&project_presets]() {
+                        for (Preset* preset : project_presets) delete preset;
+                    });
                     // BBS: backup & restore
                     q->skip_thumbnail_invalid = true;
                     model = Slic3r::Model::read_from_archive(path.string(), &config_loaded, &config_substitutions, en_3mf_file_type, strategy, &plate_data, &project_presets,
@@ -9490,6 +9495,8 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                         PresetsConfigSubstitutions preset_substitutions;
                         PresetBundle &             preset_bundle = *wxGetApp().preset_bundle;
                         preset_substitutions                     = preset_bundle.load_project_embedded_presets(project_presets, ForwardCompatibilitySubstitutionRule::Enable);
+                        if (trusted_agent_restore && !preset_substitutions.empty())
+                            throw std::runtime_error("Checkpoint requires unsupported preset substitutions");
                         if (is_bambu_studio_project)
                             log_substitutions(preset_substitutions, path.string());
                         else if (!preset_substitutions.empty())
@@ -9532,6 +9539,8 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                         }
                     }
                     // BambuStudio projects routinely carry values Orca replaces; log them rather than showing a dialog on every open.
+                    if (trusted_agent_restore && !config_substitutions.empty())
+                        throw std::runtime_error("Checkpoint requires unsupported configuration substitutions");
                     if (is_bambu_studio_project)
                         log_substitutions(config_substitutions.substitutions, path.string());
                     else if (!config_substitutions.empty())
@@ -9619,7 +9628,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                         }
 
                         auto choise = wxGetApp().app_config->get("no_warn_when_modified_gcodes");
-                        if (!published_config.published && (choise.empty() || choise != "true")) {
+                        if (!trusted_agent_restore && !published_config.published && (choise.empty() || choise != "true")) {
                             // BBS: first validate the printer
                             // validate the system profiles
                             std::set<std::string> modified_gcodes;
@@ -9828,6 +9837,9 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                 PlateDataPtrs plate_data;
                 // BBS: project embedded settings
                 std::vector<Preset *> project_presets;
+                ScopeGuard project_presets_sc([&project_presets]() {
+                    for (Preset* preset : project_presets) delete preset;
+                });
                 bool                  is_xxx;
                 Semver                file_version;
 
@@ -9927,17 +9939,22 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     PresetsConfigSubstitutions preset_substitutions;
                     PresetBundle &             preset_bundle = *wxGetApp().preset_bundle;
                     preset_substitutions                     = preset_bundle.load_project_embedded_presets(project_presets, ForwardCompatibilitySubstitutionRule::Enable);
-                    if (!preset_substitutions.empty()) show_substitutions_info(preset_substitutions);
+                    if (!preset_substitutions.empty()) {
+                        if (trusted_agent_restore) throw std::runtime_error("Checkpoint requires unsupported preset substitutions");
+                        show_substitutions_info(preset_substitutions);
+                    }
 
                     for (unsigned int i = 0; i < project_presets.size(); i++) { delete project_presets[i]; }
                     project_presets.clear();
                 }
             }
         } catch (const ConfigurationError &e) {
+            if (trusted_agent_restore) throw;
             std::string message = GUI::format(_L("Failed loading file \"%1%\". An invalid configuration was found."), filename.string()) + "\n\n" + e.what();
             GUI::show_error(q, message);
             continue;
         } catch (const std::exception &e) {
+            if (trusted_agent_restore) throw;
             if (!is_user_cancel)
                 GUI::show_error(q, e.what());
             continue;
@@ -10045,6 +10062,17 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                 return empty_result;
             }
 
+            if (trusted_agent_restore) {
+                const Vec3d bed_size = Slic3r::to_3d(this->bed.build_volume().bounding_volume2d().size(), 1.0) - 2.0 * Vec3d::Ones();
+                if (bed_size(0) <= 0 || bed_size(1) <= 0)
+                    throw std::runtime_error("Checkpoint printer has an invalid print bed");
+                for (size_t index = 0; index < model_object->instances.size(); ++index) {
+                    const Vec3d ratio = model_object->instance_bounding_box(index).size().cwiseQuotient(bed_size);
+                    const double maximum = std::max(ratio(0), ratio(1));
+                    if (!std::isfinite(maximum) || maximum > MaxUnscaledObjectBedRatio)
+                        throw std::runtime_error("Checkpoint exceeds native coordinate limits; refusing to rescale saved geometry");
+                }
+            }
             if (!model_object->instances.empty())
                 model_object->ensure_on_bed(is_project_file);
         }
@@ -10102,7 +10130,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
             }
 
             BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ":" << __LINE__ << boost::format(", before load_model_objects, count %1%")%model.objects.size();
-            auto loaded_idxs = load_model_objects(model.objects, is_project_file);
+            auto loaded_idxs = load_model_objects(model.objects, is_project_file, false, true, trusted_agent_restore);
             obj_idxs.insert(obj_idxs.end(), loaded_idxs.begin(), loaded_idxs.end());
 
             // load_model_objects only transfers ModelObjects; carry the Model-level CAD recipe
@@ -10174,7 +10202,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
         }
     }
 
-    if (load_config) {
+    if (load_config && !trusted_agent_restore) {
         DeviceManager *dev = Slic3r::GUI::wxGetApp().getDeviceManager();
         if (dev) {
             MachineObject *obj = dev->get_selected_machine();
@@ -10344,7 +10372,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
 #ifdef SLIC3R_CAD
     cad_can_show = wxGetApp().is_enable_cad_feature();
 #endif
-    if (tolal_model_count <= 0 && !q->m_exported_file && (!loaded_cad_recipe || !cad_can_show)) {
+    if (!trusted_agent_restore && tolal_model_count <= 0 && !q->m_exported_file && (!loaded_cad_recipe || !cad_can_show)) {
         dlg.Hide();
         if (!is_user_cancel) {
             const wxString text = loaded_cad_recipe
@@ -10407,7 +10435,7 @@ std::vector<size_t> Plater::priv::load_model_objects(const ModelObjectPtrs& mode
             const Vec3d size = object->instance_bounding_box(i).size();
             const Vec3d ratio = size.cwiseQuotient(bed_size);
             const double max_ratio = std::max(ratio(0), ratio(1));
-            if (max_ratio > 10000) {
+            if (max_ratio > MaxUnscaledObjectBedRatio) {
                 if (!suppress_policy_dialogs) {
                     MessageDialog dlg(q, _L("Your object appears to be too large, do you want to scale it down to fit the print bed automatically?"), _L("Object too large"),
                                       wxICON_QUESTION | wxYES);
@@ -18448,6 +18476,23 @@ std::vector<size_t> Plater::load_files(const std::vector<fs::path>& input_files,
     if (config_loaded && !is_loading_project())
         normalize_bed_types(false);
     return result;
+}
+
+void Plater::restore_project_for_agent(const boost::filesystem::path& path)
+{
+    if (m_loading_project || !get_ui_job_worker().is_idle())
+        throw std::runtime_error("Orca cannot restore while a project operation is active");
+    m_loading_project = true;
+    ScopeGuard loading_project_sc([this]() { m_loading_project = false; });
+    reset();
+    bool config_loaded = false;
+    p->load_files({path}, LoadStrategy::LoadModel | LoadStrategy::LoadConfig |
+                         LoadStrategy::Silence, false, nullptr, &config_loaded, true);
+    if (!config_loaded)
+        throw std::runtime_error("Native checkpoint did not restore its project configuration");
+    reset_project_dirty_initial_presets();
+    update_project_dirty_from_presets();
+    wxGetApp().preset_bundle->export_selections(*wxGetApp().app_config);
 }
 
 std::vector<size_t> Plater::load_model_for_agent(const Model& imported)

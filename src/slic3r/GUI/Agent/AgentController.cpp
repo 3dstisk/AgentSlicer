@@ -245,13 +245,16 @@ PreparedRequest AgentController::prepare(
     std::function<bool()> cancelled) const
 {
     PreparedRequest prepared {request, nullptr, std::move(request_abandoned)};
-    if (request.method != "model_import")
+    if (request.method != "model_import" && request.method != "project_restore")
         return prepared;
     if (!request.params.contains("expected_revision"))
         throw AgentError(ErrorCode::InvalidRequest, "expected_revision is required");
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        require_active_project(request.params);
+        if (request.method == "model_import") require_active_project(request.params);
+        else if (!request.params.at("expected_revision").is_number_unsigned() ||
+                 request.params.at("expected_revision").get<std::uint64_t>() != m_revision)
+            throw AgentError(ErrorCode::RevisionConflict, "Project revision does not match");
         require_no_active_mutation("Cannot import a model while a mutating job is active");
     }
     if (!request.params.contains("path") || !request.params.at("path").is_string())
@@ -286,6 +289,10 @@ nlohmann::json AgentController::handle_prepared(const PreparedRequest& prepared)
         if (request.method == "model_import")
             return import_model(request.params, prepared.import_snapshot,
                                 prepared.request_abandoned);
+        if (request.method == "project_restore")
+            return restore_project(request.params, prepared.import_snapshot);
+        if (request.method == "scene_export")
+            return start_scene_export(request.params);
         if (request.method == "scene_get")
             return get_scene(request.params);
         if (request.method == "object_transform")
@@ -429,6 +436,8 @@ void AgentController::refresh_jobs()
             native = m_facade->gcode_3mf_export_state();
         else if (job.type == "project_save")
             native = m_facade->project_save_state();
+        else if (job.type == "scene_export")
+            native = m_facade->scene_export_state();
         else
             continue;
         if (job.type == "project_save" && native.metadata.is_object()) {
@@ -449,6 +458,7 @@ void AgentController::refresh_jobs()
         job.warnings = native.warnings;
         if (!native.complete)
             continue;
+        if (job.type == "scene_export") capture_staging_identity(job);
         if (job.invalidated) {
             job.state = JobState::Failed;
             job.result = nullptr;
@@ -474,7 +484,7 @@ void AgentController::refresh_jobs()
                 job.result["revision"] = m_revision;
             }
             if (job.type == "gcode_export" || job.type == "gcode_3mf_export" ||
-                job.type == "project_save")
+                job.type == "project_save" || job.type == "scene_export")
                 finish_artifact(job, std::move(native));
             else
                 job.state = JobState::Succeeded;
@@ -637,7 +647,7 @@ nlohmann::json AgentController::status() const
                           "toolpath_render",
                           "desktop_capture", "preset_control", "settings_control",
                           "job_registry", "job_cancel", "slice", "gcode_export",
-                          "gcode_3mf_export", "project_save"}}
+                          "gcode_3mf_export", "project_save", "project_restore", "scene_export"}}
     };
 }
 
@@ -654,6 +664,58 @@ nlohmann::json AgentController::create_project()
         {"project_id", *m_project_id},
         {"revision", m_revision}
     };
+}
+
+nlohmann::json AgentController::restore_project(const nlohmann::json& params,
+                                                std::shared_ptr<TemporaryFile> snapshot)
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    require_no_active_mutation("Cannot restore while a native job is active");
+    if (!params.at("expected_revision").is_number_unsigned() ||
+        params.at("expected_revision").get<std::uint64_t>() != m_revision)
+        throw AgentError(ErrorCode::RevisionConflict, "Project revision does not match");
+    if (!snapshot || snapshot->path().parent_path() != m_import_staging_root ||
+        snapshot->path().extension() != ".3mf")
+        throw AgentError(ErrorCode::InvalidPath, "Restore requires a trusted 3MF snapshot");
+    // A failed full-project load may have reset native state. Invalidate the old
+    // identity first so callers cannot operate on a partially replaced project.
+    m_project_id.reset();
+    ++m_revision;
+    m_facade->restore_project(snapshot->path());
+    m_project_id = make_opaque_id("project");
+    return {{"project_id", *m_project_id}, {"revision", m_revision}};
+}
+
+nlohmann::json AgentController::start_scene_export(const nlohmann::json& params)
+{
+    if (!params.contains("expected_revision"))
+        throw AgentError(ErrorCode::InvalidRequest, "expected_revision is required");
+    const auto output = resolve_output_file(params, ".scene.bin");
+    std::lock_guard<std::mutex> lock(m_mutex);
+    require_active_project(params);
+    require_no_active_mutation("Another native job is active");
+    const std::string id = make_opaque_id("job");
+    Job job;
+    job.id = id;
+    job.type = "scene_export";
+    job.state = JobState::Running;
+    job.facade_managed = true;
+    job.project_id = *m_project_id;
+    job.source_revision = m_revision;
+    job.metadata = {{"output_path", params.at("output_path")}};
+    job.output_path = output;
+    job.staging_path = make_staging_path(output);
+    job.overwrite = params.value("overwrite", false);
+    m_jobs.emplace(id, std::move(job));
+    try {
+        m_facade->start_scene_export(m_jobs.at(id).staging_path);
+        capture_staging_identity(m_jobs.at(id));
+    } catch (const std::exception& error) {
+        Job& failed = m_jobs.at(id);
+        failed.state = JobState::Failed;
+        failed.error = {{"code", "scene_export_failed"}, {"message", error.what()}, {"details", nullptr}};
+    }
+    return {{"job_id", id}, {"state", job_state_name(m_jobs.at(id).state)}};
 }
 
 nlohmann::json AgentController::import_model(const nlohmann::json& params,

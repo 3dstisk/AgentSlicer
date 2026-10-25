@@ -1,4 +1,7 @@
 #include "AgentSlicerFacade.hpp"
+#include "AgentPlateUpdateContext.hpp"
+#include "AgentSceneGeometry.hpp"
+#include "libslic3r/Model.hpp"
 
 #include "AgentProtocol.hpp"
 #include "AgentImportLimits.hpp"
@@ -26,6 +29,8 @@
 #include <cstdint>
 #include <exception>
 #include <fstream>
+#include <future>
+#include <chrono>
 #include <mutex>
 #include <thread>
 #include <iomanip>
@@ -793,6 +798,94 @@ public:
         m_slice_plate_index.reset();
     }
 
+    void restore_project(const std::filesystem::path& path) override
+    {
+        assert_gui_thread();
+        preflight_3mf_archive(path.string());
+        ScopedGeometryOnlyPlateUpdate plate_update;
+        create_project();
+        m_plater.restore_project_for_agent(boost::filesystem::path(path.string()));
+        for (size_t index = 0; index < m_plater.model().objects.size(); ++index)
+            refresh_plate_membership(index);
+    }
+
+    void start_scene_export(const std::filesystem::path& path) override
+    {
+        assert_gui_thread();
+        if (m_geometry_future.valid())
+            throw AgentError(ErrorCode::MutationInProgress, "Geometry export is already active");
+        // Model's copy owns the project graph and retains immutable shared meshes,
+        // as the existing native 3MF save snapshot does. No worker accesses Plater.
+        auto model = std::make_shared<Model>(m_plater.model());
+        validate_import_complexity(*model);
+        nlohmann::json manifest = scene();
+        const auto matrix_json = [](const Transform3d& matrix) {
+            nlohmann::json result = nlohmann::json::array();
+            for (int column = 0; column < 4; ++column)
+                for (int row = 0; row < 4; ++row) {
+                    if (!std::isfinite(matrix(row, column)))
+                        throw AgentError(ErrorCode::InvalidRequest, "Non-finite native geometry transform");
+                    result.push_back(matrix(row, column));
+                }
+            return result;
+        };
+        for (std::size_t index = 0; index < model->objects.size(); ++index) {
+            const ModelObject& object = *model->objects[index];
+            auto& entry = manifest["objects"][index];
+            entry["volumes"] = nlohmann::json::array();
+            for (const ModelVolume* volume : object.volumes) {
+                const std::string id = "volume_" + std::to_string(volume->id().id);
+                entry["volumes"].push_back({
+                    {"volume_id", id}, {"name", volume->name},
+                    {"role", ModelVolume::type_to_string(volume->type())},
+                    {"mesh_id", id}, {"transform", matrix_json(volume->get_matrix())}
+                });
+            }
+            for (std::size_t instance = 0; instance < object.instances.size(); ++instance) {
+                const Transform3d transform = object.instances[instance]->get_matrix();
+                entry["instances"][instance]["transform"] = matrix_json(transform);
+                entry["instances"][instance]["mirrored"] = transform.linear().determinant() < 0;
+            }
+        }
+        m_geometry_cancel = std::make_shared<std::atomic<bool>>(false);
+        const auto cancelled = m_geometry_cancel;
+        m_geometry_future = std::async(std::launch::async,
+            [model, manifest = std::move(manifest), path, cancelled]() mutable -> FacadeJobState {
+            try {
+                std::vector<SceneMesh> meshes;
+                for (const ModelObject* object : model->objects) {
+                    for (const ModelVolume* volume : object->volumes) {
+                        if (cancelled->load()) return {true, false, 1.0, nullptr, nullptr, true};
+                        SceneMesh mesh;
+                        mesh.id = "volume_" + std::to_string(volume->id().id);
+                        const indexed_triangle_set& its = volume->mesh().its;
+                        mesh.positions.reserve(its.vertices.size() * 3);
+                        mesh.indices.reserve(its.indices.size() * 3);
+                        for (const auto& vertex : its.vertices)
+                            for (int axis = 0; axis < 3; ++axis) mesh.positions.push_back(vertex[axis]);
+                        for (const auto& triangle : its.indices)
+                            for (int axis = 0; axis < 3; ++axis) mesh.indices.push_back(static_cast<std::uint32_t>(triangle[axis]));
+                        meshes.push_back(std::move(mesh));
+                    }
+                }
+                const auto bytes = encode_scene_geometry(std::move(manifest), meshes);
+                if (cancelled->load()) return {true, false, 1.0, nullptr, nullptr, true};
+                write_exclusive_file(path, bytes.data(), bytes.size());
+                return {true, false, 1.0, {{"saved", true}}, nullptr};
+            } catch (const std::exception& error) {
+                return {true, true, 1.0, nullptr, {{"message", error.what()}}};
+            }
+        });
+    }
+
+    FacadeJobState scene_export_state() override
+    {
+        if (!m_geometry_future.valid()) return {true, true, 1.0, nullptr, {{"message", "Geometry export was not started"}}};
+        if (m_geometry_future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+            return {false, false, 0.5, nullptr, nullptr};
+        return m_geometry_future.get();
+    }
+
     void start_model_import(const std::filesystem::path& path) override
     {
         assert_gui_thread();
@@ -865,6 +958,7 @@ public:
             if (!imported)
                 throw AgentError(ErrorCode::InternalError,
                                  "Model import worker produced no result");
+            ScopedGeometryOnlyPlateUpdate plate_update;
             const auto indices = m_plater.load_model_for_agent(*imported);
             if (indices.empty())
                 throw AgentError(ErrorCode::InvalidRequest,
@@ -872,8 +966,10 @@ public:
             nlohmann::json objects = nlohmann::json::array();
             const Model& model = m_plater.model();
             for (const size_t index : indices)
-                if (index < model.objects.size())
+                if (index < model.objects.size()) {
+                    refresh_plate_membership(index);
                     objects.push_back(object_id(*model.objects[index]));
+                }
             m_import_state = {true, false, 1.0,
                               {{"object_ids", std::move(objects)}}, nullptr};
         } catch (const std::exception& error) {
@@ -985,7 +1081,9 @@ public:
             found_instance->set_offset(offset);
             found_object->invalidate_bounding_box();
         }
+        ScopedGeometryOnlyPlateUpdate plate_update;
         m_plater.changed_object(found_object_index);
+        refresh_plate_membership(static_cast<size_t>(found_object_index));
     }
 
     void start_auto_orient(const nlohmann::json& request) override
@@ -1928,6 +2026,14 @@ public:
             m_plater.get_ui_job_worker().cancel_all();
         };
 
+        if (type == "scene_export") {
+            if (!m_geometry_future.valid())
+                throw AgentError(ErrorCode::InvalidJobTransition, "Geometry export is no longer cancellable");
+            m_geometry_cancel->store(true);
+            m_geometry_future.wait();
+            m_geometry_future.get();
+            return;
+        }
         if (type == "model_import") {
             if (!m_import_active || !model_import_state(false).cancelled)
                 throw AgentError(ErrorCode::InvalidJobTransition,
@@ -1972,6 +2078,16 @@ public:
     }
 
 private:
+    void refresh_plate_membership(size_t object_index)
+    {
+        assert_gui_thread();
+        const ModelObject& object = *m_plater.model().objects.at(object_index);
+        ScopedGeometryOnlyPlateUpdate plate_update;
+        for (size_t index = 0; index < object.instances.size(); ++index)
+            m_plater.get_partplate_list().notify_instance_update(
+                static_cast<int>(object_index), static_cast<int>(index));
+    }
+
     struct ImportTask
     {
         std::mutex mutex;
@@ -2156,6 +2272,8 @@ private:
         };
     }
 
+    std::future<FacadeJobState> m_geometry_future;
+    std::shared_ptr<std::atomic<bool>> m_geometry_cancel;
     Plater& m_plater;
     mutable bool m_import_active {false};
     mutable std::shared_ptr<ImportTask> m_import_task;

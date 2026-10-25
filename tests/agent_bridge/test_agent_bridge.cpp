@@ -1,6 +1,7 @@
 #include <catch2/catch_all.hpp>
 
 #include "slic3r/GUI/Agent/AgentBridge.hpp"
+#include "slic3r/GUI/Agent/AgentSceneGeometry.hpp"
 #include "slic3r/GUI/Agent/AgentImportLimits.hpp"
 #include "slic3r/GUI/Agent/AgentController.hpp"
 #include "slic3r/GUI/Agent/AgentProtocol.hpp"
@@ -49,6 +50,19 @@ public:
         if (fail_create)
             throw AgentError(ErrorCode::InternalError, "native reset failed");
     }
+    std::filesystem::path restored_path;
+    std::string restored_contents;
+    void restore_project(const std::filesystem::path& path) override
+    {
+        restored_path = path;
+        std::ifstream input(path, std::ios::binary);
+        restored_contents.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    }
+    void start_scene_export(const std::filesystem::path& path) override
+    {
+        write_exclusive_file(path, "ASGEOM01", 8);
+    }
+    FacadeJobState scene_export_state() override { return {true, false, 1.0, {}, nullptr}; }
     void start_model_import(const std::filesystem::path& path) override
     {
         imported_path = path;
@@ -3152,3 +3166,64 @@ TEST_CASE("Linux bridge rejects unsafe directories and live sockets", "[AgentBri
     first.stop();
 }
 #endif
+
+TEST_CASE("Project restore uses a trusted snapshot and publishes fresh native identity", "[AgentBridge]")
+{
+    TestWorkspace workspace;
+    const auto file = workspace.root / "resume.3mf";
+    std::ofstream(file) << "native checkpoint";
+    auto facade = std::make_shared<FakeFacade>();
+    AgentController controller(facade, workspace.root, workspace.root / "shots",
+                               1024, workspace.root / "outputs", workspace.root / "imports");
+    const auto before = controller.handle({"create", "project_create", {}});
+    const auto restored = controller.handle({"restore", "project_restore", {
+        {"path", file.string()}, {"expected_revision", before["revision"]}
+    }});
+    REQUIRE(restored["project_id"] != before["project_id"]);
+    REQUIRE(restored["revision"].get<std::uint64_t>() > before["revision"].get<std::uint64_t>());
+    REQUIRE(facade->restored_contents == "native checkpoint");
+    REQUIRE(facade->restored_path.parent_path() == workspace.root / "imports");
+    REQUIRE_THROWS_AS(controller.handle({"stale", "project_restore", {
+        {"path", file.string()}, {"expected_revision", before["revision"]}
+    }}), AgentError);
+}
+
+
+TEST_CASE("Scene binary encoding preserves native coordinates and index winding", "[AgentBridge]")
+{
+    SceneMesh mesh {"volume_1", {0.f, 0.f, 0.f, 20.f, 0.f, 0.f, 0.f, 20.f, 0.f}, {0, 1, 2}};
+    auto bytes = encode_scene_geometry({{"objects", nlohmann::json::array()}}, {mesh});
+    REQUIRE(std::string(bytes.begin(), bytes.begin() + 8) == "ASGEOM01");
+    const std::uint32_t length = bytes[8] | (bytes[9] << 8) | (bytes[10] << 16) | (bytes[11] << 24);
+    const auto manifest = nlohmann::json::parse(bytes.begin() + 16, bytes.begin() + 16 + length);
+    REQUIRE(manifest["units"] == "millimeter");
+    REQUIRE(manifest["meshes"][0]["vertex_count"] == 3);
+    REQUIRE(manifest["meshes"][0]["indices_byte_offset"] == 36);
+    REQUIRE(bytes[16 + length + 36 + 4] == 1);
+    REQUIRE(bytes[16 + length + 36 + 8] == 2);
+    mesh.indices[2] = 3;
+    REQUIRE_THROWS_AS(encode_scene_geometry({}, {mesh}), AgentError);
+}
+
+TEST_CASE("Scene export publishes an owned artifact and rejects stale revisions", "[AgentBridge]")
+{
+    TestWorkspace workspace;
+    std::filesystem::create_directory(workspace.root / "outputs");
+    auto facade = std::make_shared<FakeFacade>();
+    AgentController controller(facade, workspace.root, workspace.root / "shots",
+                               1024, workspace.root / "outputs", workspace.root / "imports",
+                               workspace.root / "artifacts");
+    const auto project = controller.handle({"create", "project_create", {}});
+    const auto started = controller.handle({"export", "scene_export", {
+        {"project_id", project["project_id"]}, {"expected_revision", project["revision"]},
+        {"output_path", "native.scene.bin"}
+    }});
+    const auto job = controller.handle({"job", "job_get", {{"job_id", started["job_id"]}}});
+    INFO(job.dump());
+    REQUIRE(job["state"] == "succeeded");
+    REQUIRE(job["result"]["bytes"] == 8);
+    REQUIRE(std::filesystem::exists(workspace.root / "outputs" / "native.scene.bin"));
+    REQUIRE_THROWS_AS(controller.handle({"stale", "scene_export", {
+        {"project_id", project["project_id"]}, {"expected_revision", 0}, {"output_path", "stale.scene.bin"}
+    }}), AgentError);
+}

@@ -204,7 +204,7 @@ function responseHeaders(headers: IncomingHttpHeaders): OutgoingHttpHeaders {
 }
 
 function isProxyPath(path: string): boolean {
-  return path === "/mcp" || path === "/outputs" || path === "/outputs/" ||
+  return path.startsWith("/api/v1/") || path === "/mcp" || path === "/outputs" || path === "/outputs/" ||
     path.startsWith("/outputs/") || path.startsWith("/uploads/");
 }
 
