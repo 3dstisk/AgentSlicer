@@ -5,9 +5,9 @@ import { SessionError } from "./session-store.js";
 /** Orca's resources in the worker image (docker/agent-native). */
 export const ORCA_RESOURCES_DIR = "/opt/orcaslicer/resources";
 
-/** Only the images printer_get reports: printer covers and bed thumbnails. */
+/** Only the images printer_get and process_get report: printer covers, bed thumbnails and Orca's SVG icons. */
 const RESOURCE_PATTERN =
-  /^(?:profiles\/[^/\\\0]+\/[^/\\\0]+_cover\.png|images\/bed_[a-z_]+\.png)$/;
+  /^(?:profiles\/[^/\\\0]+\/[^/\\\0]+_cover\.png|images\/bed_[a-z_]+\.png|images\/[a-z0-9_-]+\.svg)$/;
 
 const notFound = () =>
   new SessionError("resource_not_found", "Resource not found", 404);

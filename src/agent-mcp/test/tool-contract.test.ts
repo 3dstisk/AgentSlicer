@@ -32,6 +32,7 @@ describe("MCP tool schemas", () => {
       "bed_type_set",
       "filaments_get",
       "filament_color_set",
+      "process_get",
       "scene_render",
       "toolpath_render",
       "desktop_capture",
@@ -92,6 +93,8 @@ describe("MCP tool schemas", () => {
     for (const color of ["f2754e", "#f2754", "#GG754E", "red"])
       expect(toolSchemas.filament_color_set.safeParse({ ...base, color }).success).toBe(false);
     expect(toolSchemas.filaments_get.safeParse({ project_id: "project_1" }).success).toBe(true);
+    expect(toolSchemas.process_get.safeParse({ project_id: "project_1" }).success).toBe(true);
+    expect(toolSchemas.process_get.safeParse({ project_id: "project_1", mode: "advanced" }).success).toBe(false);
   });
 
   it("requires a revision and a bed type key to set the bed type", () => {

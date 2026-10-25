@@ -387,6 +387,8 @@ nlohmann::json AgentController::handle_prepared(const PreparedRequest& prepared)
             return set_bed_type(request.params);
         if (request.method == "filaments_get")
             return get_filaments(request.params);
+        if (request.method == "process_get")
+            return get_process(request.params);
         if (request.method == "filament_color_set")
             return set_filament_color(request.params);
         if (request.method == "scene_render")
@@ -736,6 +738,7 @@ nlohmann::json AgentController::status() const
                           "plate_move_to_front", "printer_get", "bed_type_set",
                           "object_delete", "object_mirror", "object_rename",
                           "filaments_get", "filament_color_set", "object_filament_set",
+                          "process_get",
                           "scene_render",
                           "toolpath_render",
                           "desktop_capture", "preset_control", "settings_control",
@@ -1036,6 +1039,16 @@ nlohmann::json AgentController::get_filaments(const nlohmann::json& params) cons
     std::lock_guard<std::mutex> lock(m_mutex);
     require_active_project(params);
     nlohmann::json result = m_facade->filament_state();
+    result["project_id"] = *m_project_id;
+    result["revision"] = m_revision;
+    return result;
+}
+
+nlohmann::json AgentController::get_process(const nlohmann::json& params) const
+{
+    std::lock_guard<std::mutex> lock(m_mutex);
+    require_active_project(params);
+    nlohmann::json result = m_facade->process_state();
     result["project_id"] = *m_project_id;
     result["revision"] = m_revision;
     return result;

@@ -17,14 +17,15 @@ describe("Orca resources", () => {
     await mkdir(join(resources, "images"), { recursive: true });
     await writeFile(join(resources, "profiles", "BBL", "Bambu Lab A1_cover.png"), "cover");
     await writeFile(join(resources, "images", "bed_pei.png"), "bed");
+    await writeFile(join(resources, "images", "param_monotonic.svg"), "<svg/>");
     await writeFile(join(root, "secret_cover.png"), "secret");
     await symlink(join(root, "secret_cover.png"), join(resources, "profiles", "BBL", "Leak_cover.png"));
     return resources;
   };
 
-  it("opens printer covers and bed thumbnails", async () => {
+  it("opens printer covers, bed thumbnails and param icons", async () => {
     const resources = await setup();
-    for (const path of ["profiles/BBL/Bambu Lab A1_cover.png", "images/bed_pei.png"]) {
+    for (const path of ["profiles/BBL/Bambu Lab A1_cover.png", "images/bed_pei.png", "images/param_monotonic.svg"]) {
       const { handle, bytes } = await openOrcaResource(path, resources);
       expect(bytes).toBeGreaterThan(0);
       await handle.close();
@@ -36,6 +37,9 @@ describe("Orca resources", () => {
     for (const path of [
       "profiles/BBL.json",
       "images/bed_pei.svg",
+      "images/param_monotonic.png",
+      "images/nested/param_monotonic.svg",
+      "images/Param.svg",
       "profiles/../../secret_cover.png",
       "profiles/BBL/Leak_cover.png",
       "profiles/BBL/Missing_cover.png",

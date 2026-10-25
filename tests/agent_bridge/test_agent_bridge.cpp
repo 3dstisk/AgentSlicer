@@ -168,6 +168,13 @@ public:
                 {"presets", nlohmann::json::array()},
                 {"dirty", false}};
     }
+    nlohmann::json process_state() const override
+    {
+        return {{"preset", {{"name", "0.20mm Standard"}, {"system", true}, {"modified", false}}},
+                {"presets", {{{"name", "0.20mm Standard"}, {"system", true}}}},
+                {"pages", nlohmann::json::array()},
+                {"dirty", false}};
+    }
     void set_filament_color(std::size_t index, const std::string& color) override
     {
         if (index != 0)
@@ -1367,6 +1374,20 @@ TEST_CASE("Object delete, mirror and rename validate input and advance the revis
     REQUIRE_THROWS_AS(edit("object_rename", {{"object_id", "object_10"}, {"name", "a\nb"}}), AgentError);
     REQUIRE_THROWS_AS(edit("object_rename", {{"object_id", "object_99"}, {"name", "x"}}), AgentError);
     REQUIRE(revision == project["revision"].get<int>() + 5);
+}
+
+TEST_CASE("Process state reads without changing the revision", "[AgentBridge]")
+{
+    auto facade = std::make_shared<FakeFacade>();
+    AgentController controller(facade);
+    REQUIRE_THROWS_AS(controller.handle({"early", "process_get", {{"project_id", "project_missing"}}}),
+                      AgentError);
+    const auto project = controller.handle({"create", "project_create", {}});
+    const auto process = controller.handle(
+        {"process", "process_get", {{"project_id", project["project_id"]}}});
+    REQUIRE(process["preset"]["name"] == "0.20mm Standard");
+    REQUIRE(process["project_id"] == project["project_id"]);
+    REQUIRE(process["revision"] == project["revision"]);
 }
 
 TEST_CASE("Filament slots read without a revision and color changes advance it", "[AgentBridge]")

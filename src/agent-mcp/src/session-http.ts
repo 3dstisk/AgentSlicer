@@ -288,7 +288,13 @@ export function createSessionHttp(manager: SessionManager) {
           const resource = await openOrcaResource(relative);
           try {
             response.writeHead(200, {
-              "content-type": "image/png",
+              ...(relative.endsWith(".svg")
+                ? {
+                    "content-type": "image/svg+xml",
+                    // Icons render as images only; never as an active document.
+                    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+                  }
+                : { "content-type": "image/png" }),
               "content-length": resource.bytes,
               "cache-control": "private, max-age=86400",
             });

@@ -353,6 +353,8 @@ public:
 	virtual bool supports_printer_technology(const PrinterTechnology tech) const = 0;
 
 	void		create_preset_tab();
+    // Option pages in tab order, read by the agent bridge.
+    const std::vector<PageShp>& pages() const { return m_pages; }
     void        add_scaled_button(wxWindow* parent, ScalableButton** btn, const std::string& icon_name,
                                   const wxString& label = wxEmptyString,
                                   long style = wxBU_EXACTFIT | wxNO_BORDER);

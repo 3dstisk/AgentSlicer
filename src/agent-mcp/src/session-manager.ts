@@ -42,6 +42,7 @@ const ALLOWED_COMMANDS = new Set([
   "scene_get",
   "printer_get",
   "filaments_get",
+  "process_get",
   "presets_list",
   "settings_get",
   "settings_describe",

@@ -383,6 +383,7 @@ export const toolSchemas = {
     .strict(),
   printer_get: z.object(projectSnapshot).strict(),
   filaments_get: z.object(projectSnapshot).strict(),
+  process_get: z.object(projectSnapshot).strict(),
   filament_color_set: z
     .object({
       ...projectWithRevision,
@@ -577,6 +578,7 @@ export const toolNames = [
   "bed_type_set",
   "filaments_get",
   "filament_color_set",
+  "process_get",
   "scene_render",
   "toolpath_render",
   "desktop_capture",
@@ -642,6 +644,8 @@ const descriptions: Record<ToolName, string> = {
   filaments_get:
     "Read Orca's sidebar filament section: each zero-based filament slot's preset and #RRGGBB color, the visible filament presets with vendor, type, system/user origin and printer compatibility, and whether presets have unsaved edits. Change slot presets with presets_select filaments (one name per slot).",
   filament_color_set: "Set one zero-based filament slot's solid #RRGGBB color like Orca's color picker.",
+  process_get:
+    "Read Orca's sidebar Process tab in Simple mode: the selected process preset (and whether it has unsaved edits), compatible process presets, and pages of option groups in Orca's order. Each option has its label, type, control, unit, limits, choices with labels and icon paths, effective and saved values, and Orca's modified and enabled state. Change values with settings_apply in process scope; icon paths are served like printer_get images.",
   bed_type_set:
     "Set the project bed type (a printer_get bed type key such as \"Textured PEI Plate\") like Orca's bed type selector.",
   scene_render:
@@ -724,6 +728,47 @@ const filamentsResultSchema = z
           type: z.string(),
           system: z.boolean(),
           compatible: z.boolean(),
+        })
+        .strict(),
+    ),
+    dirty: z.boolean(),
+  })
+  .strict();
+const processOptionSchema = z
+  .object({
+    key: z.string(),
+    label: z.string(),
+    tooltip: z.string(),
+    type: z.string(),
+    control: z.enum(["checkbox", "filament", "select", "spin", "text"]),
+    unit: z.string().nullable(),
+    min: z.number().nullable(),
+    max: z.number().nullable(),
+    choices: z
+      .array(z.object({ value: z.string(), label: z.string(), icon: z.string().nullable() }).strict())
+      .nullable(),
+    value: settingValue,
+    saved_value: settingValue,
+    modified: z.boolean(),
+    enabled: z.boolean(),
+  })
+  .strict();
+const processResultSchema = z
+  .object({
+    project_id: opaqueId,
+    revision,
+    preset: z.object({ name: z.string(), system: z.boolean(), modified: z.boolean() }).strict(),
+    presets: z.array(z.object({ name: z.string(), system: z.boolean() }).strict()),
+    pages: z.array(
+      z
+        .object({
+          title: z.string(),
+          modified: z.boolean(),
+          groups: z.array(
+            z
+              .object({ title: z.string(), icon: z.string().nullable(), options: z.array(processOptionSchema) })
+              .strict(),
+          ),
         })
         .strict(),
     ),
@@ -1762,6 +1807,7 @@ export function createAgentCommands(dependencies: AgentToolDependencies) {
     plate_lock: defineCommand(toolSchemas.plate_lock, plateResultSchema, (params) => bridgeTool(dependencies, "plate_lock", params, plateResultSchema)),
     printer_get: defineCommand(toolSchemas.printer_get, printerResultSchema, (params) => bridgeTool(dependencies, "printer_get", params, printerResultSchema)),
     filaments_get: defineCommand(toolSchemas.filaments_get, filamentsResultSchema, (params) => bridgeTool(dependencies, "filaments_get", params, filamentsResultSchema)),
+    process_get: defineCommand(toolSchemas.process_get, processResultSchema, (params) => bridgeTool(dependencies, "process_get", params, processResultSchema)),
     filament_color_set: defineCommand(toolSchemas.filament_color_set, projectResultSchema, (params) => bridgeTool(dependencies, "filament_color_set", params, projectResultSchema)),
     bed_type_set: defineCommand(toolSchemas.bed_type_set, bedTypeResultSchema, (params) => bridgeTool(dependencies, "bed_type_set", params, bedTypeResultSchema)),
     plate_move_to_front: defineCommand(toolSchemas.plate_move_to_front, plateResultSchema, (params) => bridgeTool(dependencies, "plate_move_to_front", params, plateResultSchema)),

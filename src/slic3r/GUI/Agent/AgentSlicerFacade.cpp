@@ -16,6 +16,8 @@
 #include "slic3r/GUI/Jobs/Worker.hpp"
 #include "slic3r/GUI/PartPlate.hpp"
 #include "slic3r/GUI/Plater.hpp"
+#include "slic3r/GUI/ConfigManipulation.hpp"
+#include "slic3r/GUI/Tab.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/GCode/Thumbnails.hpp"
@@ -44,6 +46,7 @@
 
 #include <boost/algorithm/string/case_conv.hpp>
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/filesystem/operations.hpp>
 #include <openssl/sha.h>
 #include <wx/thread.h>
 
@@ -265,6 +268,31 @@ void append_presets(nlohmann::json& output, const PresetCollection& collection,
             {"compatible", preset.is_compatible}
         });
     }
+}
+
+// Orca resource image path for a param icon name, or null when Orca has none.
+nlohmann::json param_icon(const std::string& name)
+{
+    if (name.empty())
+        return nullptr;
+    const std::string relative = "images/" + name + ".svg";
+    return boost::filesystem::exists(boost::filesystem::path(resources_dir()) / relative) ?
+        nlohmann::json(relative) : nlohmann::json(nullptr);
+}
+
+// The control Orca's Field factory builds for an option in the settings tabs.
+const char* option_control(const ConfigOptionDef& def)
+{
+    using GUIType = ConfigOptionDef::GUIType;
+    if (def.type == coBool)
+        return "checkbox";
+    if (def.type == coInt && def.gui_type == GUIType::i_enum_open && def.enum_values.empty())
+        return "filament";
+    if (def.type == coEnum || (def.gui_type == GUIType::select_open && !def.enum_values.empty()))
+        return "select";
+    if (def.type == coInt)
+        return "spin";
+    return "text";
 }
 
 bool presets_are_dirty(const PresetBundle& bundle)
@@ -1804,6 +1832,114 @@ public:
             {"user_presets", std::move(user_presets)},
             {"bed", std::move(bed)}
         };
+    }
+
+    nlohmann::json process_state() const override
+    {
+        assert_gui_thread();
+        PresetBundle& bundle = *wxGetApp().preset_bundle;
+        if (bundle.printers.get_edited_preset().printer_technology() != ptFFF)
+            throw AgentError(ErrorCode::InvalidRequest, "Process settings require an FFF printer");
+        Tab* tab = wxGetApp().get_tab(Preset::TYPE_PRINT);
+        if (tab == nullptr)
+            throw AgentError(ErrorCode::InternalError, "Orca's process tab is not available");
+        const PresetCollection& prints = bundle.prints;
+        const Preset& edited = prints.get_edited_preset();
+        const Preset& saved = prints.get_selected_preset();
+
+        // Orca's own enable and visibility rules, run on a copy of the edited
+        // process like TabPrint::toggle_options (first nozzle variant).
+        std::map<std::string, bool> enabled;
+        std::map<std::string, bool> visible;
+        ConfigManipulation rules(
+            [] {},
+            [&enabled](const std::string& key, bool toggle, int opt_index) {
+                if (opt_index <= 0)
+                    enabled[key] = toggle;
+            },
+            [&visible](const std::string& key, bool toggle, int opt_index) {
+                if (opt_index <= 0)
+                    visible[key] = toggle;
+            },
+            [](const std::string&, const boost::any&) {});
+        rules.set_is_BBL_Printer(bundle.is_bbl_vendor());
+        DynamicPrintConfig config = edited.config;
+        rules.toggle_print_fff_options(&config, 0, true);
+        const auto flag = [](const std::map<std::string, bool>& flags, const std::string& key) {
+            const auto found = flags.find(key);
+            return found == flags.end() || found->second;
+        };
+
+        nlohmann::json pages = nlohmann::json::array();
+        for (const PageShp& page : tab->pages()) {
+            if (!page)
+                continue;
+            nlohmann::json groups = nlohmann::json::array();
+            bool page_modified = false;
+            for (const ConfigOptionsGroupShp& group : page->m_optgroups) {
+                nlohmann::json options = nlohmann::json::array();
+                for (const Line& line : group->get_lines()) {
+                    for (const Option& option : line.get_options()) {
+                        const ConfigOptionDef& def = option.opt;
+                        const std::string& key = def.opt_key;
+                        const ConfigOption* value = edited.config.option(key);
+                        if (value == nullptr)
+                            continue;
+                        const ConfigOption* saved_value = saved.config.option(key);
+                        const bool modified = saved_value == nullptr || !(*value == *saved_value);
+                        // Like Orca, a page is modified by any of its options, shown or not.
+                        page_modified = page_modified || modified;
+                        if (def.mode > comSimple || !flag(visible, key) ||
+                            !is_agent_setting_allowed(key) ||
+                            std::string(option_type_name(def.type)) == "unsupported")
+                            continue;
+                        nlohmann::json choices = nullptr;
+                        if (!def.enum_values.empty()) {
+                            choices = nlohmann::json::array();
+                            for (std::size_t index = 0; index < def.enum_values.size(); ++index)
+                                choices.push_back(
+                                    {{"value", def.enum_values[index]},
+                                     {"label", index < def.enum_labels.size() ?
+                                                   def.enum_labels[index] : def.enum_values[index]},
+                                     {"icon", param_icon("param_" + def.enum_values[index])}});
+                        }
+                        options.push_back({
+                            {"key", key}, {"label", def.label}, {"tooltip", def.tooltip},
+                            {"type", option_type_name(def.type)}, {"control", option_control(def)},
+                            {"unit", def.sidetext.empty() ? nlohmann::json(nullptr) :
+                                                            nlohmann::json(def.sidetext)},
+                            {"min", def.min <= -FLT_MAX ? nlohmann::json(nullptr) : nlohmann::json(def.min)},
+                            {"max", def.max >= FLT_MAX ? nlohmann::json(nullptr) : nlohmann::json(def.max)},
+                            {"choices", std::move(choices)},
+                            {"value", option_value(*value, def)},
+                            {"saved_value", saved_value != nullptr ?
+                                                option_value(*saved_value, def) : nlohmann::json(nullptr)},
+                            {"modified", modified}, {"enabled", flag(enabled, key)}
+                        });
+                    }
+                }
+                if (!options.empty())
+                    groups.push_back({{"title", std::string(group->title.ToUTF8())},
+                                      {"icon", param_icon(std::string(group->icon.ToUTF8()))},
+                                      {"options", std::move(options)}});
+            }
+            if (!groups.empty())
+                pages.push_back({{"title", std::string(page->title().ToUTF8())},
+                                 {"modified", page_modified}, {"groups", std::move(groups)}});
+        }
+
+        nlohmann::json presets = nlohmann::json::array();
+        for (const Preset& preset : prints.get_presets()) {
+            if (preset.is_default || !preset.is_visible ||
+                (!preset.is_compatible && preset.name != saved.name))
+                continue;
+            presets.push_back({{"name", preset.name}, {"system", preset.is_system}});
+        }
+        return {{"preset", {{"name", saved.name}, {"system", saved.is_system},
+                            {"modified", prints.current_is_dirty()}}},
+                {"presets", std::move(presets)},
+                {"pages", std::move(pages)},
+                {"dirty", presets_are_dirty(bundle)}};
     }
 
     nlohmann::json filament_state() const override
