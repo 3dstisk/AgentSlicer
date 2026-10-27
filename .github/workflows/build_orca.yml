@@ -725,6 +725,12 @@ jobs:
           git -C "$test_repo_dir" remote add origin https://github.com/OrcaSlicer/orca-test-repo.git
           git -C "$test_repo_dir" fetch --depth 1 origin "$ORCA_TEST_REPO_REV"
           git -C "$test_repo_dir" checkout --detach FETCH_HEAD
+          # Keep the pinned runner's hard 20% size gate and unchanged fixtures.
+          # The local baseline adopts only upstream's reviewed multicolor fix:
+          # https://github.com/OrcaSlicer/orca-test-repo/pull/26
+          # Its newer runner makes metric drift warning-only; its P1S fixture
+          # also changed, so retain our existing runner and P1S baseline.
+          cp scripts/ci-slicer-baseline.json "$test_repo_dir/baseline.json"
           python3 "$test_repo_dir/run_test.py" "${{ github.workspace }}/build/package/bin/orca-slicer"
 
       - name: Build orca_custom_preset_tests
