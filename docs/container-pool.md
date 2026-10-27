@@ -15,21 +15,26 @@ services when a clean application state is required.
 
 ## Deploy the pool
 
-Use `portainer-stack.yaml` for the gateway and its three fixed workers. Before
-deploying it in Portainer:
+Production deployment is owned by the `3dstisk-monorepo` Pulumi project
+[`infra/pulumi/apps/agent-slicer`](https://github.com/3dstisk/3dstisk-monorepo/tree/main/infra/pulumi/apps/agent-slicer).
+This repository builds and tests the native worker and pool images; the
+monorepo pins their published digests and deploys Doppler runtime wrappers
+through its Release Production workflow. Follow that project's README for the
+initial Portainer handoff, required Doppler keys, validation, and rollback.
+The owner removes the old live Portainer stack before the Pulumi cutover.
 
-- replace `CHANGE_ME_LONG_RANDOM_POOL_TOKEN` with the external management token;
-- replace `CHANGE_ME_LONG_RANDOM_WORKER_TOKEN` with a different internal token;
-- configure Portainer with authenticated GHCR access; and
-- ensure the external `nginx-proxy-public` network exists.
-
-The stack starts `agent-slicer-worker-1`, `agent-slicer-worker-2`, and
+The deployment starts `agent-slicer-worker-1`, `agent-slicer-worker-2`, and
 `agent-slicer-worker-3` on the private `agent-slicer-pool` network. The gateway
 has no Docker socket mount. It registers the configured worker URLs, waits for
 their `/readyz` endpoints, and rewrites proxied requests to the shared internal
 worker token. It also probes a worker immediately before assigning it. An
 unhealthy worker remains out of circulation and is retried until its service is
 healthy again.
+
+The POS web editor uses a separate `agent-slicer-worker` on the UI-owned
+`agent-slicer-private` overlay, with persistent `/config`. It never occupies a
+batch pool slot. Keep this worker's authentication token aligned with the UI
+and follow the [durable editor contract](HLSD/editor-sessions-and-geometry.md).
 
 ## Acquire and use a lease
 
