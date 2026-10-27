@@ -29,8 +29,20 @@ RUN test "${TARGETARCH}" = "amd64" \
 
 COPY --from=extract /tmp/squashfs-root/ /opt/orcaslicer/
 
-RUN chmod 0755 \
+# Extraction can leave owner-only directories; the runtime launches as abc.
+RUN chmod -R a+rX /opt/orcaslicer \
+    && chmod 0755 \
         /opt/orcaslicer/AppRun \
         /opt/orcaslicer/bin/orca-slicer \
     && test -x /opt/orcaslicer/AppRun \
-    && test -x /opt/orcaslicer/bin/orca-slicer
+    && test -x /opt/orcaslicer/bin/orca-slicer \
+    && smoke_home="$(mktemp -d)" \
+    && chown abc:abc "${smoke_home}" \
+    && (cd "${smoke_home}" \
+        && timeout -k 5s 60s s6-setuidgid abc \
+            env HOME="${smoke_home}" \
+                XDG_CACHE_HOME="${smoke_home}/.cache" \
+                XDG_CONFIG_HOME="${smoke_home}/.config" \
+                XDG_DATA_HOME="${smoke_home}/.local/share" \
+            /opt/orcaslicer/AppRun --help >/dev/null) \
+    && rm -rf "${smoke_home}"

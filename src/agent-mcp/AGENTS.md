@@ -34,3 +34,5 @@ native project state. For editor session or geometry changes, read the
 - New native operations require controller/facade tests and real-worker
   acceptance on an identified native image. Adapter schemas do not prove native
   implementation availability.
+- Public tool changes also update the strict ordered discovery expectation in
+  `e2e/docker-e2e.mjs`; run it against the built worker before release.
