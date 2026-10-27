@@ -6116,7 +6116,7 @@ void PresetBundle::convert_filament_preset_name(const std::string& machine_name,
 }
 // Load a config file from a boost property_tree. This is a private method called from load_config_file.
 // is_external == false on if called from ConfigWizard
-void PresetBundle::load_config_file_config(const std::string &name_or_path, bool is_external, DynamicPrintConfig &&config, Semver file_version, bool selected, PublishedConfig *published_config)
+void PresetBundle::load_config_file_config(const std::string &name_or_path, bool is_external, DynamicPrintConfig &&config, Semver file_version, bool selected, PublishedConfig *published_config, bool preserve_external_name)
 {
     PrinterTechnology printer_technology = Preset::printer_technology(config);
 
@@ -6248,7 +6248,7 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
 		[&config, &inherits, &inherits_values,
          &compatible_printers_condition, &compatible_printers_condition_values,
          &compatible_prints_condition, &compatible_prints_condition_values,
-         is_external, &name, &name_or_path, file_version, selected]
+         is_external, &name, &name_or_path, file_version, selected, preserve_external_name]
 		(PresetCollection &presets, size_t idx, const std::string &key, const std::set<std::string> &different_keys, std::string filament_id) {
 		// Split the "compatible_printers_condition" and "inherits" values one by one from a single vector to the print & printer profiles.
 		inherits = inherits_values[idx];
@@ -6258,7 +6258,7 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
         //BBS: add config related logs
         BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(": , name %1%, is_external %2%, inherits %3%")%name %is_external %inherits;
 		if (is_external)
-			presets.load_external_preset(name_or_path, name, config.opt_string(key, true), config, different_keys, PresetCollection::LoadAndSelect::Always, file_version, filament_id);
+			presets.load_external_preset(name_or_path, name, config.opt_string(key, true), config, different_keys, PresetCollection::LoadAndSelect::Always, file_version, filament_id, preserve_external_name);
 		else
             presets.load_preset(presets.path_from_name(name, inherits.empty()), name, config, selected, file_version).save(nullptr);
 	};
@@ -6312,7 +6312,7 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
                         convert_filament_preset_name(old_machine_profile_name->value, old_filament_profile_names->values.front());
                     else
                         convert_filament_preset_name(old_machine_profile_name->value, inherits);
-                    loaded = this->filaments.load_external_preset(name_or_path, name, old_filament_profile_names->values.front(), config, filament_different_keys_set, PresetCollection::LoadAndSelect::Always, file_version, filament_id).first;
+                    loaded = this->filaments.load_external_preset(name_or_path, name, old_filament_profile_names->values.front(), config, filament_different_keys_set, PresetCollection::LoadAndSelect::Always, file_version, filament_id, preserve_external_name).first;
                 }
                 else {
                     // called from Config Wizard.
@@ -6385,7 +6385,8 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
                             PresetCollection::LoadAndSelect::Never :
                             PresetCollection::LoadAndSelect::OnlyIfModified,
                         file_version,
-                        filament_id);
+                        filament_id, preserve_external_name,
+                        /*isolate_filament_slots=*/preserve_external_name);
                     any_modified |= modified;
                     this->filament_presets[i] = loaded->name;
                 }

@@ -52,7 +52,16 @@ export const sessionRecordSchema = z.object({
   artifacts: z.array(artifactSchema),
   uploads: z.record(
     z.string(),
-    z.object({ path: z.string(), bytes: z.number().int().nonnegative() }),
+    z.object({
+      path: z.string(),
+      bytes: z.number().int().nonnegative(),
+      sha256: z
+        .string()
+        .regex(/^[a-f0-9]{64}$/)
+        .optional(),
+      complete: z.boolean().default(false),
+      expires_at: z.number().optional(),
+    }),
   ),
   jobs: z.record(
     z.string(),
@@ -63,6 +72,14 @@ export const sessionRecordSchema = z.object({
       output_filename: z.string().optional(),
     }),
   ),
+  restore_upload: z
+    .object({
+      path: z.string(),
+      expected_revision: z.number().int().nonnegative(),
+      state: z.enum(["pending", "published", "failed"]),
+    })
+    .nullable()
+    .default(null),
   recovery_reason: z.string().nullable(),
 });
 export type SessionRecord = z.infer<typeof sessionRecordSchema>;
@@ -269,6 +286,7 @@ export class SessionStore {
       artifacts: [],
       uploads: {},
       jobs: {},
+      restore_upload: null,
       recovery_reason: null,
     };
     this.db

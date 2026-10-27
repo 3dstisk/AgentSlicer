@@ -1939,6 +1939,25 @@ describe("Streamable HTTP MCP server", () => {
     expect(successfulSaveWithoutSnapshot.isError).toBe(true);
   });
 
+  it("lists and selects restored preset names longer than opaque IDs", async () => {
+    const name = "Žlutá".repeat(40) + "(archive.3mf)";
+    const selection = { printer: name, process: name, filaments: [name] };
+    const { client } = await startMcp({ bridgeCall: (method) => ({
+      project_id: "project-1", revision: 2, selected: selection,
+      ...(method === "presets_list" ? { presets: [
+        { scope: "filament", name, selected: true, compatible: true },
+      ] } : {}),
+    }) });
+    for (const method of ["presets_list", "presets_select"]) {
+      const result = await client.callTool({ name: method, arguments: {
+        project_id: "project-1", expected_revision: 2,
+        ...(method === "presets_select" ? { selection } : {}),
+      } });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({ selected: selection });
+    }
+  });
+
   it("lists and atomically selects exact compatible presets", async () => {
     const { client, calls } = await startMcp();
     const listed = await client.callTool({

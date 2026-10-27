@@ -15,6 +15,14 @@ limits, and rejects extreme sizes or configuration substitutions instead of
 silently rewriting the checkpoint. Parse errors propagate to the API. Ordinary
 desktop import policies remain unchanged. Cross-version restore is not qualified.
 
+Agent restore preserves nonempty saved preset names instead of appending its
+private source filename. Conflicting project presets use deterministic numeric
+names; conflicting filament slots retain separate resolved configurations and
+system inheritance. Other desktop imports retain their filename suffix policy.
+Preset names use the native 64 KiB configuration-value byte budget, independently
+of the 128-character bound for process-local object, project and job IDs.
+
+
 ## Storage and worker ownership
 
 Node 24 or later provides `node:sqlite`. The session root defaults to
@@ -75,10 +83,11 @@ project refuses to overwrite it.
 All routes retain the outer bearer token and Host/Origin policy. A trusted
 application server supplies `owner_id` at creation and `x-agent-slicer-owner`
 when listing. These are application identities, not user-entered authentication.
-Full native `project_restore` is internal to the checksum-verified checkpoint
-service. It is absent from public MCP/HTTP command discovery and cannot be
-called through either command transport or scoped session commands. Uploaded
-models use geometry-only import; they do not become trusted configuration.
+Full native `project_restore` is internal to the session service. It is absent
+from public MCP/HTTP command discovery and scoped session commands. Ordinary
+model imports remain geometry-only. An explicit full-project open uses the
+scoped `restore-upload` lifecycle route; upload integrity alone never authorizes
+an unscoped native restore.
 
 - `POST /api/v1/sessions`: `{owner_id, creation_key, title}`. Creation is
   idempotent per owner/key and returns `{session, token}`.
@@ -86,8 +95,20 @@ models use geometry-only import; they do not become trusted configuration.
 - `GET /api/v1/sessions/<id>`: metadata, never an editing credential.
 - `POST .../open`: `{actor:{kind:"human"|"agent",id}}`, returning metadata and
   `lease_token`. `heartbeat` extends it; `transfer` takes a new actor and rotates it.
+- `POST .../restore-upload`: `{path,expected_revision}` opens a completed,
+  checksum-verified 3MF upload owned by this session, including its native
+  configuration. Both capabilities, active ownership, idle state and the live
+  native identity/revision must match. A private bounded copy rechecks the bytes
+  and checksum without following a source symlink. Native archive and model
+  complexity limits apply. Upload completion is persisted only after directory
+  synchronization; legacy/uncompleted records are unverified. Failed and expired
+  reservations are reclaimed on subsequent upload preparation.
 - `POST .../checkpoint`, `release`, `complete`, `abandon`; `DELETE .../<id>`
-  removes only a completed or abandoned record and its private files.
+  removes only a completed or abandoned record and its private files. Lifecycle
+  requests may include `{expected_revision,expected_generation}` together to
+  atomically reject a changed binding before checkpointing or release. Save and
+  return uses this fence so only the revision copied to Custom Printing releases
+  the editing lease.
 - `POST .../commands/<name>`: validated native parameters, returning
   `{result, session}`. Native project/revision checks still apply. Import paths
   and job IDs must belong to this session; output filenames are server-generated.
@@ -102,6 +123,24 @@ editing capabilities are independent. Do not expose worker/session/lease secrets
 in browser JSON, URLs, logs or geometry. The monorepo Bun server stores them in
 private local files and binds its HttpOnly cookie to an owner. This private local
 boundary is not production operator SSO.
+
+## Full-project open publication
+
+Before replacing native state, `restore-upload` persists a pending restore
+fence. The new native binding, incremented generation and dirty state are saved
+before checkpointing; success is published atomically with the new checkpoint.
+Until that publication, a failure or restart blocks commands and background
+checkpointing of the uncertain state. Reopening restores the previous verified
+checkpoint; it does not retry the uploaded project automatically. Inputs need
+reuploading after reopen because ordinary recovery removes session uploads.
+
+A repeated request for the same upload and source revision returns the published
+result without loading it twice. It still requires the current editing lease.
+Preflight reserves headroom for a maximum-sized checkpoint before native
+replacement. Cleanup failure after checkpoint publication does not change a
+successful open into a failed restore. The native export path independently
+rejects post-processing scripts and slicing pipeline plugins; opening a project
+does not authorize executing those settings.
 
 ## Geometry contract
 

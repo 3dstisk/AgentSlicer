@@ -9679,7 +9679,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                                     for (std::string& id : ids->values)
                                         id = agent->to_orca_filament_id(id);
                             }
-                            preset_bundle->load_config_model(filename.string(), std::move(config), file_version, &published_config);
+                            preset_bundle->load_config_model(filename.string(), std::move(config), file_version, &published_config, trusted_agent_restore);
                             if (config_loaded_out != nullptr)
                                 *config_loaded_out = true;
 

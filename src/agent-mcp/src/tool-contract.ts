@@ -14,6 +14,11 @@ import {
 } from "./uploads.js";
 
 const opaqueId = z.string().min(1).max(128);
+const maxConfigValueBytes = 65_536;
+const presetName = z.string().min(1).refine(
+  (name) => Buffer.byteLength(name, "utf8") <= maxConfigValueBytes,
+  "Preset name exceeds the native configuration-value byte limit",
+);
 const revision = z.number().int().nonnegative();
 const maxConfigSnapshotEnvelopeBytes = 512 * 1024;
 const settingName = z.string().min(1).max(256);
@@ -116,10 +121,10 @@ const settingValue = z.union([
 ]);
 const presetSelection = z
   .object({
-    printer: opaqueId.optional().describe("Exact printer preset name"),
-    process: opaqueId.optional().describe("Exact process preset name"),
+    printer: presetName.optional().describe("Exact printer preset name"),
+    process: presetName.optional().describe("Exact process preset name"),
     filaments: z
-      .array(opaqueId)
+      .array(presetName)
       .min(1)
       .max(64)
       .optional()
@@ -1000,15 +1005,15 @@ const registeredJobStartResultSchema = z
   .strict();
 const selectedPresetsSchema = z
   .object({
-    printer: opaqueId.nullable(),
-    process: opaqueId.nullable(),
-    filaments: z.array(opaqueId).max(64),
+    printer: presetName.nullable(),
+    process: presetName.nullable(),
+    filaments: z.array(presetName).max(64),
   })
   .strict();
 const presetEntrySchema = z
   .object({
     scope: configurationScope,
-    name: opaqueId,
+    name: presetName,
     selected: z.boolean(),
     compatible: z.boolean(),
   })
@@ -1133,7 +1138,7 @@ const jobErrorSchema = z
 // Native bounds each value and the entire canonical/response snapshot by bytes,
 // rather than imposing an artificial count cap on settings or redactions.
 const snapshotSettingsSchema = z
-  .record(safeSettingKey, z.string().max(65_536));
+  .record(safeSettingKey, z.string().max(maxConfigValueBytes));
 const configOverrideSchema = z
   .object({
     kind: z.enum(["object", "volume", "plate"]),

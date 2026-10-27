@@ -155,6 +155,22 @@ export function createSessionHttp(manager: SessionManager) {
           request.method === "POST" &&
           ["checkpoint", "release", "complete", "abandon"].includes(action)
         ) {
+          const expected = header(request, "content-type")?.startsWith(
+            "application/json",
+          )
+            ? parse(
+                z.union([
+                  z.object({}).strict(),
+                  z
+                    .object({
+                      expected_revision: z.number().int().nonnegative(),
+                      expected_generation: z.number().int().nonnegative(),
+                    })
+                    .strict(),
+                ]),
+                await body(request),
+              )
+            : {};
           json(
             response,
             200,
@@ -163,6 +179,12 @@ export function createSessionHttp(manager: SessionManager) {
               token,
               lease,
               action as "checkpoint" | "release" | "complete" | "abandon",
+              "expected_revision" in expected
+                ? {
+                    expected_revision: expected.expected_revision,
+                    expected_generation: expected.expected_generation,
+                  }
+                : undefined,
             ),
           );
           return;
@@ -204,6 +226,23 @@ export function createSessionHttp(manager: SessionManager) {
             response,
             201,
             await manager.receiveUpload(id, token, lease, upload, request),
+          );
+          return;
+        }
+        if (request.method === "POST" && action === "restore-upload") {
+          const input = parse(
+            z
+              .object({
+                path: z.string(),
+                expected_revision: z.number().int().nonnegative(),
+              })
+              .strict(),
+            await body(request),
+          );
+          json(
+            response,
+            200,
+            await manager.restoreUpload(id, token, lease, input),
           );
           return;
         }
@@ -306,7 +345,11 @@ export function createSessionHttp(manager: SessionManager) {
           try {
             relative = decodeURIComponent(action.slice("resources/".length));
           } catch {
-            throw new SessionError("resource_not_found", "Resource not found", 404);
+            throw new SessionError(
+              "resource_not_found",
+              "Resource not found",
+              404,
+            );
           }
           const resource = await openOrcaResource(relative);
           try {
@@ -315,7 +358,8 @@ export function createSessionHttp(manager: SessionManager) {
                 ? {
                     "content-type": "image/svg+xml",
                     // Icons render as images only; never as an active document.
-                    "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox",
+                    "content-security-policy":
+                      "default-src 'none'; style-src 'unsafe-inline'; sandbox",
                   }
                 : { "content-type": "image/png" }),
               "content-length": resource.bytes,

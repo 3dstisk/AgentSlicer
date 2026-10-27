@@ -17,9 +17,9 @@ native project state. For editor session or geometry changes, read the
   After authenticating an editing capability, verify that its session is the
   active worker owner. A failed release metadata save can leave a stale binding
   and capability after ownership has already been cleared or reassigned.
-- Keep full configuration restore private to verified checkpoints. Public MCP
-  registration and HTTP discovery/dispatch use the public registry allowlist;
-  sharing command implementation must not expose internal restore operations.
+- Full configuration restore uses verified checkpoints or the scoped
+  `restore-upload` lifecycle route described in the session contract. Keep
+  `project_restore` out of public MCP/HTTP command discovery and dispatch.
 - Native IDs belong to one process/project incarnation. Persist native 3MF
   checkpoints and validate the active binding after restore; never reconstruct
   an editor project by importing geometry and guessing its configuration.

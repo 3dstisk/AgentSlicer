@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import { Readable } from "node:stream";
+import type { IncomingMessage } from "node:http";
 import { mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -53,13 +56,13 @@ describe("operator session recovery and ownership", () => {
     const b = await manager.create("owner-b", "b", "Second");
     const opened = await manager.open(a.session.id, a.token, actor);
     const save = SessionStore.prototype.save;
-    const saveSpy = vi.spyOn(SessionStore.prototype, "save").mockImplementation(
-      function (this: SessionStore, session) {
+    const saveSpy = vi
+      .spyOn(SessionStore.prototype, "save")
+      .mockImplementation(function (this: SessionStore, session) {
         if (session.id === a.session.id && !session.native && !session.lease)
           throw new Error("release metadata write failed");
         return save.call(this, session);
-      },
-    );
+      });
     try {
       await expect(
         manager.finish(a.session.id, a.token, opened.lease_token, "release"),
@@ -78,7 +81,10 @@ describe("operator session recovery and ownership", () => {
     try {
       await expect(
         manager.finish(a.session.id, a.token, opened.lease_token, "abandon"),
-      ).rejects.toMatchObject({ code: "session_recovery_required", status: 409 });
+      ).rejects.toMatchObject({
+        code: "session_recovery_required",
+        status: 409,
+      });
       expect(createSpy).not.toHaveBeenCalled();
       expect(engine.project).toBe(second.native!.project_id);
       await expect(
@@ -96,7 +102,18 @@ describe("operator session recovery and ownership", () => {
     const opened = await manager.open(a.session.id, a.token, actor);
     const again = await manager.open(a.session.id, a.token, actor);
     expect(again.native).toEqual(opened.native);
-    await expect(manager.command(a.session.id, a.token, opened.lease_token, "project_restore", { path: "/workspace/unverified.3mf", expected_revision: opened.native!.revision })).rejects.toMatchObject({ code: "command_not_available" });
+    await expect(
+      manager.command(
+        a.session.id,
+        a.token,
+        opened.lease_token,
+        "project_restore",
+        {
+          path: "/workspace/unverified.3mf",
+          expected_revision: opened.native!.revision,
+        },
+      ),
+    ).rejects.toMatchObject({ code: "command_not_available" });
     await expect(
       manager.open(b.session.id, b.token, actor),
     ).rejects.toMatchObject({ code: "worker_capacity" });
@@ -513,4 +530,320 @@ describe("operator session recovery and ownership", () => {
     ).toHaveLength(1);
     expect(await readdir(f.options.outputRoot)).toEqual([]);
   });
+});
+
+describe("full project upload restore", () => {
+  async function uploaded(
+    manager: SessionManager,
+    id: string,
+    token: string,
+    lease: string,
+    value = 42,
+  ) {
+    const bytes = Buffer.from(JSON.stringify({ value }));
+    const prepared = await manager.prepareUpload(id, token, lease, {
+      filename: "prepared.3mf",
+      bytes: bytes.length,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    });
+    const request = Object.assign(Readable.from([bytes]), {
+      headers: {
+        "content-length": String(bytes.length),
+        "content-type": "application/octet-stream",
+      },
+    }) as unknown as IncomingMessage;
+    await manager.receiveUpload(id, token, lease, prepared.upload_id, request);
+    return prepared;
+  }
+  it("restores settings, publishes a checkpoint, safely repeats a lost reply and reopens", async () => {
+    const { manager, engine } = await fixture();
+    const created = await manager.create("owner", "restore", "Restore");
+    const opened = await manager.open(created.session.id, created.token, actor);
+    const upload = await uploaded(
+      manager,
+      created.session.id,
+      created.token,
+      opened.lease_token,
+    );
+    const restore = vi.spyOn(engine, "restore");
+    const result = await manager.restoreUpload(
+      created.session.id,
+      created.token,
+      opened.lease_token,
+      {
+        path: upload.workspace_path,
+        expected_revision: opened.native!.revision,
+      },
+    );
+    expect(result.generation).toBe(opened.generation + 1);
+    expect(result.dirty).toBe(false);
+    expect(engine.value).toBe(42);
+    expect(result.checkpoint).not.toEqual(opened.checkpoint);
+    await manager.restoreUpload(
+      created.session.id,
+      created.token,
+      opened.lease_token,
+      {
+        path: upload.workspace_path,
+        expected_revision: opened.native!.revision,
+      },
+    );
+    expect(restore).toHaveBeenCalledTimes(1);
+    await manager.finish(
+      created.session.id,
+      created.token,
+      opened.lease_token,
+      "release",
+    );
+    await manager.open(created.session.id, created.token, actor);
+    expect(engine.value).toBe(42);
+    restore.mockRestore();
+  });
+  it("rejects incomplete, altered, foreign and stale uploads before replacing native state", async () => {
+    const { manager, engine, root } = await fixture();
+    const created = await manager.create("owner", "verify", "Verify");
+    const opened = await manager.open(created.session.id, created.token, actor);
+    const pending = await manager.prepareUpload(
+      created.session.id,
+      created.token,
+      opened.lease_token,
+      { filename: "pending.3mf", bytes: 12, sha256: "0".repeat(64) },
+    );
+    await expect(
+      manager.restoreUpload(
+        created.session.id,
+        created.token,
+        opened.lease_token,
+        {
+          path: pending.workspace_path,
+          expected_revision: opened.native!.revision,
+        },
+      ),
+    ).rejects.toMatchObject({ code: "upload_unverified" });
+    const ready = await uploaded(
+      manager,
+      created.session.id,
+      created.token,
+      opened.lease_token,
+    );
+    const restore = vi.spyOn(engine, "restore");
+    await expect(
+      manager.restoreUpload(
+        created.session.id,
+        created.token,
+        opened.lease_token,
+        {
+          path: ready.workspace_path,
+          expected_revision: opened.native!.revision - 1,
+        },
+      ),
+    ).rejects.toMatchObject({ code: "revision_conflict" });
+    await expect(
+      manager.restoreUpload(
+        created.session.id,
+        created.token,
+        opened.lease_token,
+        {
+          path: "/workspace/uploads/foreign.3mf",
+          expected_revision: opened.native!.revision,
+        },
+      ),
+    ).rejects.toMatchObject({ code: "upload_not_owned" });
+    await writeFile(
+      join(root, "workspace/uploads", basename(ready.workspace_path)),
+      JSON.stringify({ value: 99 }),
+    );
+    await expect(
+      manager.restoreUpload(
+        created.session.id,
+        created.token,
+        opened.lease_token,
+        {
+          path: ready.workspace_path,
+          expected_revision: opened.native!.revision,
+        },
+      ),
+    ).rejects.toMatchObject({ code: "checkpoint_corrupt" });
+    expect(restore).not.toHaveBeenCalled();
+    restore.mockRestore();
+  });
+  it("fences destructive failures and recovers the previous checkpoint", async () => {
+    const { manager, engine } = await fixture();
+    const created = await manager.create("owner", "failure", "Failure");
+    const opened = await manager.open(created.session.id, created.token, actor);
+    const ready = await uploaded(
+      manager,
+      created.session.id,
+      created.token,
+      opened.lease_token,
+    );
+    const restore = vi
+      .spyOn(engine, "restore")
+      .mockImplementationOnce(async () => {
+        await engine.create();
+        engine.value = 999;
+        throw new Error("partial native restore");
+      });
+    await expect(
+      manager.restoreUpload(
+        created.session.id,
+        created.token,
+        opened.lease_token,
+        {
+          path: ready.workspace_path,
+          expected_revision: opened.native!.revision,
+        },
+      ),
+    ).rejects.toThrow("partial native restore");
+    const failed = await manager.read(created.session.id, created.token);
+    expect(failed.checkpoint).toEqual(opened.checkpoint);
+    expect(failed.native).toBeNull();
+    await expect(
+      manager.command(
+        created.session.id,
+        created.token,
+        opened.lease_token,
+        "settings_apply",
+        { value: 11 },
+      ),
+    ).rejects.toMatchObject({ code: "session_recovery_required" });
+    restore.mockRestore();
+    await manager.open(created.session.id, created.token, actor);
+    expect(engine.value).toBe(0);
+  });
+  it("preserves the old checkpoint if saving the restored project fails", async () => {
+    const { manager, engine } = await fixture();
+    const created = await manager.create(
+      "owner",
+      "save-failure",
+      "Save failure",
+    );
+    const opened = await manager.open(created.session.id, created.token, actor);
+    const ready = await uploaded(
+      manager,
+      created.session.id,
+      created.token,
+      opened.lease_token,
+    );
+    engine.failSave = true;
+    await expect(
+      manager.restoreUpload(
+        created.session.id,
+        created.token,
+        opened.lease_token,
+        {
+          path: ready.workspace_path,
+          expected_revision: opened.native!.revision,
+        },
+      ),
+    ).rejects.toThrow("disk write failed");
+    expect(
+      (await manager.read(created.session.id, created.token)).checkpoint,
+    ).toEqual(opened.checkpoint);
+    engine.failSave = false;
+    await manager.open(created.session.id, created.token, actor);
+    expect(engine.value).toBe(0);
+  });
+});
+
+it("does not publish a restored project when checkpoint metadata fails", async () => {
+  const { manager, engine } = await fixture();
+  const created = await manager.create(
+    "owner",
+    "metadata-failure",
+    "Metadata failure",
+  );
+  const opened = await manager.open(created.session.id, created.token, actor);
+  const bytes = Buffer.from(JSON.stringify({ value: 42 }));
+  const prepared = await manager.prepareUpload(
+    created.session.id,
+    created.token,
+    opened.lease_token,
+    {
+      filename: "project.3mf",
+      bytes: bytes.length,
+      sha256: createHash("sha256").update(bytes).digest("hex"),
+    },
+  );
+  await manager.receiveUpload(
+    created.session.id,
+    created.token,
+    opened.lease_token,
+    prepared.upload_id,
+    Object.assign(Readable.from([bytes]), {
+      headers: {
+        "content-type": "application/octet-stream",
+        "content-length": String(bytes.length),
+      },
+    }) as unknown as IncomingMessage,
+  );
+  const original = SessionStore.prototype.save;
+  const spy = vi
+    .spyOn(SessionStore.prototype, "save")
+    .mockImplementation(function (this: SessionStore, record) {
+      if (record.restore_upload?.state === "published")
+        throw new Error("restore checkpoint metadata failed");
+      original.call(this, record);
+    });
+  try {
+    await expect(
+      manager.restoreUpload(
+        created.session.id,
+        created.token,
+        opened.lease_token,
+        {
+          path: prepared.workspace_path,
+          expected_revision: opened.native!.revision,
+        },
+      ),
+    ).rejects.toThrow("restore checkpoint metadata failed");
+  } finally {
+    spy.mockRestore();
+  }
+  const failed = await manager.read(created.session.id, created.token);
+  expect(failed.checkpoint).toEqual(opened.checkpoint);
+  expect(failed.native).toBeNull();
+  await manager.open(created.session.id, created.token, actor);
+  expect(engine.value).toBe(0);
+});
+
+it("does not release edits made after the saved generation and revision", async () => {
+  const { manager, engine } = await fixture();
+  const created = await manager.create("owner", "release-race", "Release race");
+  const opened = await manager.open(created.session.id, created.token, actor);
+  await manager.command(
+    created.session.id,
+    created.token,
+    opened.lease_token,
+    "settings_apply",
+    { expected_revision: opened.native!.revision, value: 5 },
+  );
+  await expect(
+    manager.finish(
+      created.session.id,
+      created.token,
+      opened.lease_token,
+      "release",
+      {
+        expected_revision: opened.native!.revision,
+        expected_generation: opened.generation,
+      },
+    ),
+  ).rejects.toMatchObject({ code: "revision_conflict" });
+  expect(
+    (await manager.read(created.session.id, created.token)).lease,
+  ).not.toBeNull();
+  const current = await manager.read(created.session.id, created.token);
+  await manager.finish(
+    created.session.id,
+    created.token,
+    opened.lease_token,
+    "release",
+    {
+      expected_revision: current.native!.revision,
+      expected_generation: current.generation,
+    },
+  );
+  await manager.open(created.session.id, created.token, actor);
+  expect(engine.value).toBe(5);
 });

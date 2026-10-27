@@ -2965,7 +2965,9 @@ std::pair<Preset*, bool> PresetCollection::load_external_preset(
     // Select the preset after loading?
     LoadAndSelect                select,
     const Semver                file_version,
-    const std::string           filament_id)
+    const std::string           filament_id,
+    bool                        preserve_external_name,
+    bool                        isolate_filament_slots)
 {
     std::deque<Preset>::iterator it       = this->find_preset_internal(original_name);
     bool                         found    = it != m_presets.end() && it->name == original_name;
@@ -2994,6 +2996,16 @@ std::pair<Preset*, bool> PresetCollection::load_external_preset(
             return nullptr;
         }, &keys);
     std::string                 &inherits = Preset::inherits(cfg);
+    const auto matches = [&](const Preset& preset) {
+        if (!preserve_external_name || (preset.is_system && !isolate_filament_slots))
+            return profile_print_params_same(preset.config, cfg);
+        DynamicPrintConfig normalized(cfg);
+        const char* identity = m_type == Preset::TYPE_PRINT ? "print_settings_id" :
+            m_type == Preset::TYPE_FILAMENT ? "filament_settings_id" : "printer_settings_id";
+        if (const ConfigOption* value = preset.config.option(identity))
+            normalized.set_key_value(identity, value->clone());
+        return preset.config == normalized;
+    };
 
     //BBS: add config related logs
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(" enter, type %1% , path %2%, name %3%, original_name %4%, inherits %5%")%Preset::get_type_string(m_type) %path %name %original_name %inherits;
@@ -3001,7 +3013,7 @@ std::pair<Preset*, bool> PresetCollection::load_external_preset(
         // Some filament profile has been selected and modified already.
         // Check whether this profile is equal to the modified edited profile.
         const Preset &edited = this->get_edited_preset();
-        if ((edited.name == original_name || edited.name == inherits) && profile_print_params_same(edited.config, cfg)) {
+        if ((edited.name == original_name || edited.name == inherits) && matches(edited)) {
             // Just point to that already selected and edited profile.
             //BBS: add config related logs
             BOOST_LOG_TRIVIAL(debug) << __FUNCTION__ << boost::format(" Just point to that already selected and edited profile %1%")%edited.name;
@@ -3016,7 +3028,7 @@ std::pair<Preset*, bool> PresetCollection::load_external_preset(
         it = this->find_preset_renamed(original_name);
         found = it != m_presets.end();
     }*/
-    if (found && profile_print_params_same(it->config, cfg)) {
+    if (found && matches(*it)) {
         // The preset exists and it matches the values stored inside config.
         if (select == LoadAndSelect::Always)
             this->select_preset(it - m_presets.begin());
@@ -3039,7 +3051,7 @@ std::pair<Preset*, bool> PresetCollection::load_external_preset(
         if (it == m_presets.end() || it->name != inherits)
             it = this->find_preset_renamed(inherits);
         found = it != m_presets.end();
-        if (found && profile_print_params_same(it->config, cfg)) {
+        if (found && matches(*it)) {
             // The system preset exists and it matches the values stored inside config.
             if (select == LoadAndSelect::Always)
                 this->select_preset(it - m_presets.begin());
@@ -3055,7 +3067,11 @@ std::pair<Preset*, bool> PresetCollection::load_external_preset(
             return std::make_pair(&(*it), false);
         }
     }
-    if (found) {
+    // A multi-slot restore must not edit a shared system preset in place.
+    if (found && preserve_external_name && isolate_filament_slots &&
+        it->is_system && inherits.empty())
+        inherits = it->name;
+    if (found && (!preserve_external_name || (it->is_system && !isolate_filament_slots))) {
         //BBS: only select preset for always
         //if (select != LoadAndSelect::Never) {
         if (select == LoadAndSelect::Always) {
@@ -3127,12 +3143,13 @@ std::pair<Preset*, bool> PresetCollection::load_external_preset(
                 prefix = reduced_name + "-" + std::to_string(idx) ;
         }
         //new_name = name + suffix;
-        new_name = prefix + "(" + name + ")";
+        new_name = preserve_external_name && !original_name.empty() ?
+            prefix : prefix + "(" + name + ")";
         it = this->find_preset_internal(new_name);
         if (it == m_presets.end() || it->name != new_name)
             // Unique profile name. Insert a new profile.
             break;
-        if (profile_print_params_same(it->config, cfg)) {
+        if (matches(*it)) {
             // The preset exists and it matches the values stored inside config.
             if (select == LoadAndSelect::Always)
                 this->select_preset(it - m_presets.begin());

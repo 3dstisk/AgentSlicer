@@ -580,6 +580,32 @@ describe("MCP tool schemas", () => {
     ).toBe(false);
   });
 
+  it("accepts long Unicode preset names while retaining opaque identity limits", () => {
+    const name = "Černá".repeat(40) + "(saved-project.3mf)";
+    const base = { project_id: "project-1", expected_revision: 4 };
+    expect(toolSchemas.presets_select.safeParse({
+      ...base, selection: { printer: name, process: name, filaments: [name] },
+    }).success).toBe(true);
+    expect(toolSchemas.presets_select.safeParse({
+      ...base, selection: { printer: "é".repeat(32_769) },
+    }).success).toBe(false);
+    expect(toolSchemas.presets_select.safeParse({
+      ...base, project_id: "x".repeat(129), selection: { printer: name },
+    }).success).toBe(false);
+    expect(toolSchemas.object_settings_get.safeParse({
+      project_id: "project-1", object_ids: ["x".repeat(129)],
+    }).success).toBe(false);
+    expect(jobResultSchema.safeParse({
+      job_id: "save-1", type: "project_save", state: "running", progress: 0,
+      project_id: "project-1", source_revision: 4, warnings: [],
+      metadata: { output_path: "project.3mf",
+        config_snapshot: { schema_version: 2, revision: 4,
+          presets: { printer: name, process: name, filaments: [name] },
+          settings: {}, overrides: [], redacted_keys: [], sha256: "a".repeat(64), bytes: 4096 } },
+      result: null, error: null, revision: 4,
+    }).success).toBe(true);
+  });
+
   it("accepts strict v2 override provenance and rejects unsafe visible fields", () => {
     const snapshot = {
       schema_version: 2,

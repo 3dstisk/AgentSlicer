@@ -686,7 +686,11 @@ public:
         // Select the preset after loading?
         LoadAndSelect                select = LoadAndSelect::Always,
         const Semver                file_version = Semver(),
-        const std::string           filament_id = std::string());
+        const std::string           filament_id = std::string(),
+        // Durable agent restore retains saved identity, independent of its private staging filename.
+        bool                        preserve_external_name = false,
+        // Multi-slot restore must not edit a system preset shared by a different slot.
+        bool                        isolate_filament_slots = false);
 
     // Save the preset under a new name. If the name is different from the old one,
     // a new preset is stored into the list of presets.

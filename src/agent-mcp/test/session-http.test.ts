@@ -60,6 +60,32 @@ it("requires session and editing capabilities, streams scoped checkpoints and cl
     expect((await request(`/${id}/commands/scene_get`, {})).status).toBe(200);
     const read = await (await request(`/${id}`)).json();
     expect(read.lease_token).toBeUndefined();
+    expect(
+      (
+        await request(`/${id}/release`, {
+          expected_revision: opened.native.revision - 1,
+          expected_generation: opened.generation,
+        })
+      ).status,
+    ).toBe(409);
+    expect(
+      (
+        await request(`/${id}/release`, {
+          expected_revision: opened.native.revision,
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await request(`/${id}/restore-upload`, {
+          path: "/workspace/uploads/foreign.3mf",
+          expected_revision: opened.native.revision,
+        })
+      ).status,
+    ).toBe(403);
+    expect((await (await request(`/${id}`)).json()).native).toEqual(
+      opened.native,
+    );
     const checkpoint = await request(
       `/${id}/artifacts/${opened.checkpoint.id}`,
     );

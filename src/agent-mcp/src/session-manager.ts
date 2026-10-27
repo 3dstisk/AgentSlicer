@@ -296,6 +296,14 @@ export class SessionManager {
     store: SessionStore,
     actor?: SessionActor,
   ): void {
+    if (
+      session.restore_upload?.state === "pending" ||
+      session.restore_upload?.state === "failed"
+    )
+      throw new SessionError(
+        "session_recovery_required",
+        "Reopen the session after a failed project restore",
+      );
     if (!session.lease || session.lease.expires_at <= this.now())
       throw new SessionError(
         "session_lease_expired",
@@ -326,6 +334,18 @@ export class SessionManager {
     const active = store.active();
     if (!active) return;
     const session = store.get(active);
+    if (
+      session.restore_upload?.state === "pending" ||
+      session.restore_upload?.state === "failed"
+    ) {
+      session.native = null;
+      session.lease = null;
+      session.recovery_reason = "project_open_failed";
+      session.restore_upload.state = "failed";
+      store.save(session);
+      store.setActive(null);
+      return;
+    }
     const native = await this.options.engine.status();
     if (!session.native || native.project_id !== session.native.project_id) {
       if (native.project_id && store.setting("editor_worker"))
@@ -439,6 +459,7 @@ export class SessionManager {
           await rm(restorePath, { force: true });
         }
         session.generation++;
+        session.restore_upload = null;
         session.lease = {
           id: randomUUID(),
           actor,
@@ -595,6 +616,7 @@ export class SessionManager {
   private async checkpoint(
     store: SessionStore,
     session: SessionRecord,
+    beforePublish?: () => void,
   ): Promise<void> {
     const status = await this.options.engine.status();
     if (!session.native || status.project_id !== session.native.project_id)
@@ -611,9 +633,12 @@ export class SessionManager {
     const previous = session.checkpoints;
     session.checkpoints = [checkpoint, ...previous].slice(0, 2);
     session.dirty = false;
+    beforePublish?.();
     await this.publishArtifactRecord(store, session, checkpoint, () => {
       session.checkpoints = previous;
       session.dirty = true;
+      if (beforePublish && session.restore_upload)
+        session.restore_upload.state = "pending";
     });
     store.audit(session.id, "checkpoint", {
       id: checkpoint.id,
@@ -841,6 +866,19 @@ export class SessionManager {
       const store = await this.store();
       const session = store.authorize(id, token);
       this.lease(session, leaseToken, store);
+      for (const [uploadId, upload] of Object.entries(session.uploads)) {
+        if (
+          !upload.complete &&
+          (!upload.expires_at || upload.expires_at <= this.now())
+        ) {
+          await rm(
+            join(this.options.workspaceRoot, "uploads", basename(upload.path)),
+            { force: true },
+          );
+          delete session.uploads[uploadId];
+        }
+      }
+      store.save(session);
       let uploads = this.uploads.get(id);
       if (!uploads) {
         uploads = new UploadManager(
@@ -863,6 +901,9 @@ export class SessionManager {
       session.uploads[result.upload_id] = {
         path: result.workspace_path,
         bytes: input.bytes,
+        sha256: result.sha256,
+        complete: false,
+        expires_at: this.now() + this.options.uploadTtlMs,
       };
       store.save(session);
       return {
@@ -895,7 +936,160 @@ export class SessionManager {
           "Prepare a fresh upload after adapter restart",
           410,
         );
-      return uploads.receive(uploadId, request);
+      try {
+        const received = await uploads.receive(uploadId, request);
+        const folder = await open(
+          join(this.options.workspaceRoot, "uploads"),
+          "r",
+        );
+        try {
+          await folder.sync();
+        } finally {
+          await folder.close();
+        }
+        session.uploads[uploadId]!.complete = true;
+        store.save(session);
+        return received;
+      } catch (error) {
+        logApiFailure(`session.${id}.upload.${uploadId}.receive`, error);
+        const failed = session.uploads[uploadId];
+        if (failed)
+          await rm(
+            join(this.options.workspaceRoot, "uploads", basename(failed.path)),
+            { force: true },
+          ).catch((cleanup: unknown) =>
+            logApiFailure(`session.${id}.upload.${uploadId}.cleanup`, cleanup),
+          );
+        delete session.uploads[uploadId];
+        store.save(session);
+        throw error;
+      }
+    });
+  }
+  /** Explicit full-project open; never registered as a public native command. */
+  async restoreUpload(
+    id: string,
+    token: string | undefined,
+    leaseToken: string,
+    input: { path: string; expected_revision: number },
+  ) {
+    return this.exclusive(async () => {
+      const store = await this.store();
+      const session = store.authorize(id, token);
+      this.lease(session, leaseToken, store);
+      this.requireIdle(session);
+      // A repeated request after a lost response returns the already-published result.
+      if (
+        session.restore_upload?.state === "published" &&
+        session.restore_upload.path === input.path &&
+        session.restore_upload.expected_revision === input.expected_revision
+      )
+        return this.public(session);
+      const status = await this.options.engine.status();
+      if (status.project_id !== session.native!.project_id)
+        throw new SessionError(
+          "session_recovery_required",
+          "Native project identity changed",
+        );
+      if (
+        status.revision !== input.expected_revision ||
+        session.native!.revision !== input.expected_revision
+      )
+        throw new SessionError(
+          "revision_conflict",
+          "Project changed before opening the uploaded project",
+        );
+      const upload = Object.values(session.uploads).find(
+        (entry) => entry.path === input.path,
+      );
+      if (
+        !upload ||
+        !/^\/workspace\/uploads\/[a-f0-9-]+\.3mf$/.test(upload.path)
+      )
+        throw new SessionError(
+          "upload_not_owned",
+          "Select a 3MF uploaded by this session",
+          403,
+        );
+      if (!upload.complete || !upload.sha256)
+        throw new SessionError(
+          "upload_unverified",
+          "Upload must complete and pass checksum verification before project open",
+          409,
+        );
+      if (
+        store.storageBytes() + this.options.maxBytes >
+        (this.options.maxStorageBytes ?? this.options.maxBytes * 4)
+      )
+        throw new SessionError(
+          "session_storage_full",
+          "Not enough checkpoint headroom to safely replace the project",
+          507,
+        );
+      const restorePath = join(
+        this.options.workspaceRoot,
+        "editor-restore",
+        `${randomUUID()}.3mf`,
+      );
+      const source = await open(
+        join(this.options.workspaceRoot, "uploads", basename(upload.path)),
+        constants.O_RDONLY | constants.O_NOFOLLOW,
+      );
+      await copySessionFile(
+        source,
+        restorePath,
+        upload.bytes,
+        this.options.maxBytes,
+        upload.sha256,
+      );
+      try {
+        // Persist the fence before calling native: a timeout or crash must never let
+        // monitoring checkpoint a partially replaced project over the last good one.
+        session.restore_upload = {
+          path: input.path,
+          expected_revision: input.expected_revision,
+          state: "pending",
+        };
+        store.save(session);
+        session.native = await this.options.engine.restore(
+          restorePath,
+          status.revision,
+        );
+        session.generation++;
+        session.dirty = true;
+        session.jobs = {};
+        session.recovery_reason = null;
+        store.save(session);
+        await this.checkpoint(store, session, () => {
+          session.restore_upload!.state = "published";
+        });
+      } catch (error) {
+        logApiFailure(`session.${id}.restore_upload`, error);
+        // Checkpoint publication is success even if best-effort cleanup then fails.
+        const persisted = store.get(id);
+        if (
+          persisted.restore_upload?.state === "published" &&
+          persisted.restore_upload.path === input.path &&
+          persisted.restore_upload.expected_revision === input.expected_revision
+        )
+          return this.public(persisted);
+        session.restore_upload = {
+          path: input.path,
+          expected_revision: input.expected_revision,
+          state: "failed",
+        };
+        session.native = null;
+        session.lease = null;
+        session.recovery_reason = "project_open_failed";
+        store.save(session);
+        store.setActive(null);
+        throw error;
+      } finally {
+        await rm(restorePath, { force: true }).catch((error: unknown) =>
+          logApiFailure(`session.${id}.restore_upload.cleanup`, error),
+        );
+      }
+      return this.public(session);
     });
   }
   async finish(
@@ -903,6 +1097,7 @@ export class SessionManager {
     token: string | undefined,
     leaseToken: string,
     action: "release" | "complete" | "abandon" | "checkpoint",
+    expected?: { expected_revision: number; expected_generation: number },
   ) {
     return this.exclusive(async () => {
       const store = await this.store();
@@ -925,6 +1120,19 @@ export class SessionManager {
       }
       this.lease(session, leaseToken, store);
       this.requireIdle(session);
+      if (expected) {
+        const current = await this.options.engine.status();
+        if (
+          current.project_id !== session.native!.project_id ||
+          session.generation !== expected.expected_generation ||
+          current.revision !== expected.expected_revision ||
+          session.native!.revision !== expected.expected_revision
+        )
+          throw new SessionError(
+            "revision_conflict",
+            "Project changed after the saved revision; save again before releasing",
+          );
+      }
       if (action !== "abandon") await this.checkpoint(store, session);
       if (action !== "checkpoint") {
         const idle = await this.options.engine.create();

@@ -984,6 +984,7 @@ public:
         ScopedGeometryOnlyPlateUpdate plate_update;
         create_project();
         m_plater.restore_project_for_agent(boost::filesystem::path(path.string()));
+        validate_import_complexity(m_plater.model());
         for (size_t index = 0; index < m_plater.model().objects.size(); ++index)
             refresh_plate_membership(index);
     }
